@@ -616,9 +616,39 @@ const PatientChat = ({
 export default function App() {
   const [view, setView] = useState<Role>('paciente');
   
-  // App State
-  const [appointments, setAppointments] = useState<Appointment[]>(mockAppointments);
+  // App State — citas cargadas desde Supabase
+  const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [loadingAppointments, setLoadingAppointments] = useState(true);
   const [deepAgentAlerts, setDeepAgentAlerts] = useState<string[]>([]);
+
+  // Cargar citas desde Supabase al montar
+  useEffect(() => {
+    const fetchAppointments = async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/appointments`);
+        if (!res.ok) throw new Error('Error al cargar citas');
+        const data = await res.json();
+        // Mapear campos snake_case de Supabase al formato del frontend
+        const mapped: Appointment[] = data.map((a: any) => ({
+          id: a.id,
+          patientName: a.patient_name,
+          dni: a.dni,
+          doctor: a.doctor,
+          specialty: a.specialty,
+          date: a.date,
+          time: a.time,
+          status: a.status,
+        }));
+        setAppointments(mapped);
+      } catch {
+        // Si falla Supabase, usar datos de ejemplo como fallback
+        setAppointments(mockAppointments);
+      } finally {
+        setLoadingAppointments(false);
+      }
+    };
+    fetchAppointments();
+  }, []);
   
   // Chat State
   const [messages, setMessages] = useState<Message[]>([
@@ -664,13 +694,45 @@ export default function App() {
       const { response, newState } = await callAgentAPI(
         text,
         agentState,
-        (newApp) => {
-          const appointment: Appointment = {
-            id: Math.random().toString(36).substr(2, 9),
-            ...newApp,
-            status: 'Confirmada',
-          };
-          setAppointments(prev => [...prev, appointment]);
+        async (newApp) => {
+          try {
+            // Guardar en Supabase
+            const res = await fetch(`${BACKEND_URL}/appointments`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                patient_name: newApp.patientName,
+                dni: newApp.dni,
+                doctor: newApp.doctor,
+                specialty: newApp.specialty,
+                date: newApp.date,
+                time: newApp.time,
+                status: 'Confirmada',
+              }),
+            });
+            if (res.ok) {
+              const saved = await res.json();
+              const appointment: Appointment = {
+                id: saved.id,
+                patientName: saved.patient_name,
+                dni: saved.dni,
+                doctor: saved.doctor,
+                specialty: saved.specialty,
+                date: saved.date,
+                time: saved.time,
+                status: saved.status,
+              };
+              setAppointments(prev => [...prev, appointment]);
+            }
+          } catch {
+            // Fallback local si falla Supabase
+            const appointment: Appointment = {
+              id: Math.random().toString(36).substr(2, 9),
+              ...newApp,
+              status: 'Confirmada',
+            };
+            setAppointments(prev => [...prev, appointment]);
+          }
         }
       );
       setAgentState(newState);
