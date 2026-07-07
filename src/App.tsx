@@ -113,12 +113,14 @@ const AdminDashboard = ({
   appointments, 
   deepAgentAlerts, 
   runDeepAgent,
+  isDeepAgentRunning,
   liveMessages,
   agentState
 }: { 
   appointments: Appointment[], 
   deepAgentAlerts: string[],
   runDeepAgent: () => void,
+  isDeepAgentRunning: boolean,
   liveMessages: Message[],
   agentState: AgentState
 }) => {
@@ -216,8 +218,8 @@ const AdminDashboard = ({
                 <div className="absolute top-0 right-0 p-4 opacity-20"><BrainCircuit size={64}/></div>
                 <div className="text-indigo-100 text-sm font-medium relative z-10">Agente Analítico (DeepAgent)</div>
                 <div className="text-2xl font-bold mb-3 relative z-10">En espera</div>
-                <button onClick={runDeepAgent} className="relative z-10 text-xs bg-white/20 hover:bg-white/30 backdrop-blur-sm transition px-4 py-2 rounded-lg font-medium w-fit flex items-center gap-2">
-                  <Activity size={14}/> Ejecutar Análisis
+                <button onClick={runDeepAgent} disabled={isDeepAgentRunning} className="relative z-10 text-xs bg-white/20 hover:bg-white/30 backdrop-blur-sm transition px-4 py-2 rounded-lg font-medium w-fit flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed">
+                  <Activity size={14}/> {isDeepAgentRunning ? 'Analizando...' : 'Ejecutar Análisis'}
                 </button>
               </div>
             </div>
@@ -625,12 +627,31 @@ export default function App() {
   const [isTyping, setIsTyping] = useState(false);
   const [agentState, setAgentState] = useState<AgentState>({ intent: null, extractedData: {}, step: 'idle' });
 
-  // Deep Agent Simulation
-  const handleRunDeepAgent = () => {
-    setDeepAgentAlerts(prev => [
-      ...prev,
-      "El Dr. Silva (Cardiología) presenta un 25% de inasistencias los Lunes por la mañana en el último trimestre. Se sugiere automatizar recordatorios vía WhatsApp con 48h de anticipación y habilitar 'overbooking' controlado para ese bloque."
-    ]);
+  // Deep Agent — llama al backend real para análisis de patrones
+  const [isDeepAgentRunning, setIsDeepAgentRunning] = useState(false);
+
+  const handleRunDeepAgent = async () => {
+    setIsDeepAgentRunning(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/deep-agent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          appointments: appointments,
+          stats: mockStats,
+        }),
+      });
+      if (!res.ok) throw new Error(`Error ${res.status}`);
+      const data = await res.json();
+      setDeepAgentAlerts(prev => [...prev, ...data.alerts]);
+    } catch {
+      setDeepAgentAlerts(prev => [
+        ...prev,
+        '⚠️ No se pudo conectar con el Deep Agent. Verifica que el backend esté corriendo.'
+      ]);
+    } finally {
+      setIsDeepAgentRunning(false);
+    }
   };
 
   // Handle incoming messages from patient — llama al backend LangGraph real
@@ -703,6 +724,7 @@ export default function App() {
           appointments={appointments} 
           deepAgentAlerts={deepAgentAlerts}
           runDeepAgent={handleRunDeepAgent}
+          isDeepAgentRunning={isDeepAgentRunning}
           liveMessages={messages}
           agentState={agentState}
         />
