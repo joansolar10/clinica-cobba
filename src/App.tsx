@@ -62,6 +62,7 @@ const mockStats = [
   { name: 'Vie', citas: 18, noShows: 2 },
 ];
 
+<<<<<<< HEAD
 // ── URL del backend LangGraph ─────────────────────────────────────────────
 // En desarrollo: http://localhost:8000
 // En producción: cambia por tu URL de Railway/Render
@@ -106,6 +107,168 @@ async function callAgentAPI(
 
   return { response: data.response, newState };
 }
+=======
+// This function simulates the LangGraph workflow: Router -> Validator -> Scheduler
+const simulateAgentGraph = (
+  userInput: string, 
+  currentState: AgentState, 
+  addAppointment: (app: Omit<Appointment, 'id' | 'status'>) => void
+): { response: string, newState: AgentState } => {
+  const text = userInput.toLowerCase();
+  let state = { ...currentState };
+  
+  // 1. ESCALAMIENTO AGENT
+  if (text.includes('humano') || text.includes('recepcion') || text.includes('persona')) {
+    state.step = 'handoff';
+    return { 
+      response: "He pausado el bot y notificado a recepción. Un agente humano leerá tu historial y tomará el chat en breve. Por favor, espera en línea.", 
+      newState: state 
+    };
+  }
+
+  // 2. CONVERSATIONAL AGENT (Router & Intent Classifier)
+  if (state.step === 'idle') {
+    if (text.includes('agendar') || text.includes('cita')) {
+      state.intent = 'agendar';
+      state.step = 'asking_specialty';
+      return {
+        response: "¡Hola! Claro, te ayudaré a agendar una cita. ¿Para qué especialidad necesitas buscar disponibilidad? (Ej. Cardiología, Pediatría, Medicina General)",
+        newState: state
+      };
+    } else {
+      return {
+        response: "Soy el asistente virtual de la Clínica Cobba. Puedo ayudarte a agendar citas o comunicarte con un humano. ¿Qué deseas hacer?",
+        newState: state
+      };
+    }
+  }
+
+  // 3. VALIDATOR & SCHEDULER AGENTS (Interactive Multi-step Extraction)
+  if (state.intent === 'agendar') {
+    
+    if (state.step === 'asking_specialty') {
+      let spec = 'Medicina General';
+      if (text.includes('cardio')) spec = 'Cardiología';
+      else if (text.includes('pediatr')) spec = 'Pediatría';
+      else if (text.includes('derma')) spec = 'Dermatología';
+      
+      state.extractedData.specialty = spec;
+      state.step = 'choosing_option';
+      
+      return {
+        response: `He consultado la base de datos para ${spec}. Tengo estas opciones disponibles para esta semana:\n\n1) Dr. Silva - Mañana a las 09:00 AM\n2) Dra. Paz - Jueves a las 11:30 AM\n\nPor favor, responde "1" o "2" según tu preferencia, o dime si necesitas otras fechas.`,
+        newState: state
+      };
+    }
+
+    if (state.step === 'choosing_option') {
+      // 1. Evaluar PRIMERO si pide otra fecha explícitamente (ej. miércoles, tarde, otra hora)
+      if (text.includes('otra') || text.includes('otro') || text.includes('tarde') || 
+          text.includes('lunes') || text.includes('martes') || text.includes('miercoles') || text.includes('miércoles') || 
+          text.includes('viernes') || text.includes('semana') || /\b(10|11|12|13|14|15|16|17|18|19|20|21|22|23|24)\b/.test(text)) {
+        
+        // Simular búsqueda de la nueva alternativa
+        state.extractedData.doctor = 'Dr. López';
+        state.extractedData.date = 'Miércoles';
+        state.extractedData.time = '10:00 AM';
+        state.step = 'asking_first_name';
+        return {
+          response: `He buscado en nuestra agenda y encontré disponibilidad con el Dr. López para el Miércoles a las 10:00 AM. Lo he pre-reservado para ti. Para proceder con el registro, ¿cuál es tu PRIMER NOMBRE?`,
+          newState: state
+        };
+      } 
+      // 2. Si no pide otra fecha, evaluar opción 1 con límite de palabra (\b1\b evita que "10" calce aquí)
+      else if (/\b(1|uno)\b/.test(text) || text.includes('mañana')) {
+        state.extractedData.doctor = 'Dr. Silva';
+        state.extractedData.date = 'Mañana';
+        state.extractedData.time = '09:00 AM';
+        state.step = 'asking_first_name';
+        return {
+          response: `¡Excelente elección! Hemos pre-reservado el espacio con ${state.extractedData.doctor}. Para proceder con el registro, ¿cuál es tu PRIMER NOMBRE?`,
+          newState: state
+        };
+      } 
+      // 3. Evaluar opción 2 con límite de palabra
+      else if (/\b(2|dos)\b/.test(text) || text.includes('jueves')) {
+        state.extractedData.doctor = 'Dra. Paz';
+        state.extractedData.date = 'Jueves';
+        state.extractedData.time = '11:30 AM';
+        state.step = 'asking_first_name';
+        return {
+          response: `¡Excelente elección! Hemos pre-reservado el espacio con ${state.extractedData.doctor}. Para proceder con el registro, ¿cuál es tu PRIMER NOMBRE?`,
+          newState: state
+        };
+      } 
+      // 4. Fallback si el usuario escribe algo incomprensible
+      else {
+        return {
+          response: "No logré captar tu elección. Por favor, responde '1', '2', o mencióname un día (ej. 'el viernes') u hora para buscar más opciones.",
+          newState: state
+        };
+      }
+    }
+
+    if (state.step === 'asking_first_name') {
+      // Capitalize first letter
+      state.extractedData.firstName = userInput.charAt(0).toUpperCase() + userInput.slice(1); 
+      state.step = 'asking_last_name';
+      return {
+        response: `Gracias ${state.extractedData.firstName}. Ahora, ¿cuáles son tus APELLIDOS?`,
+        newState: state
+      };
+    }
+
+    if (state.step === 'asking_last_name') {
+      state.extractedData.lastName = userInput;
+      state.step = 'asking_dni';
+      return {
+        response: `Perfecto. Por último, necesitamos tu número de DNI o Documento de Identidad para la validación:`,
+        newState: state
+      };
+    }
+
+    if (state.step === 'asking_dni') {
+      const numericDNI = userInput.replace(/[^0-9]/g, '');
+      if (numericDNI.length < 8) {
+         return { response: "El documento parece inválido o muy corto. Por favor, ingresa al menos 8 números.", newState: state };
+      }
+      state.extractedData.dni = numericDNI;
+      state.step = 'ready_to_schedule';
+      return {
+        response: `¡Datos validados! Resumen de tu cita:\n- Paciente: ${state.extractedData.firstName} ${state.extractedData.lastName}\n- Especialidad: ${state.extractedData.specialty}\n- Médico: ${state.extractedData.doctor}\n- Horario: ${state.extractedData.date} a las ${state.extractedData.time}\n\n¿Confirmas la creación de esta cita? (Responde "Sí" o "No")`,
+        newState: state
+      };
+    }
+
+    if (state.step === 'ready_to_schedule') {
+      if (text.includes('si') || text.includes('sí') || text.includes('ok') || text.includes('confirm')) {
+        
+        // MOCK: Save to DB via Callback
+        addAppointment({
+          patientName: `${state.extractedData.firstName} ${state.extractedData.lastName}`,
+          dni: state.extractedData.dni,
+          doctor: state.extractedData.doctor || 'Dr. Asignado',
+          specialty: state.extractedData.specialty || 'General',
+          date: state.extractedData.date || 'Pendiente',
+          time: state.extractedData.time || 'Pendiente',
+        });
+
+        // Reset state
+        const finalState: AgentState = { intent: null, extractedData: {}, step: 'idle' };
+        return {
+          response: "✅ ¡Transacción exitosa! Tu cita ha sido confirmada y asegurada en nuestra base de datos. Te enviaremos un recordatorio por WhatsApp 24 horas antes.",
+          newState: finalState
+        };
+      } else {
+         const resetState: AgentState = { intent: null, extractedData: {}, step: 'idle' };
+         return { response: "Entiendo, he liberado el espacio y cancelado el agendamiento. ¿Puedo ayudarte en algo más?", newState: resetState };
+      }
+    }
+  }
+
+  return { response: "No estoy seguro de entender. Puedes escribir 'agendar cita' o 'hablar con un humano'.", newState: state };
+};
+>>>>>>> 72e8eb7af575437c4a798e179ec2623144687ee1
 
 // --- COMPONENTS ---
 
@@ -633,12 +796,18 @@ export default function App() {
     ]);
   };
 
+<<<<<<< HEAD
   // Handle incoming messages from patient — llama al backend LangGraph real
   const handleUserMessage = async (text: string) => {
+=======
+  // Handle incoming messages from patient
+  const handleUserMessage = (text: string) => {
+>>>>>>> 72e8eb7af575437c4a798e179ec2623144687ee1
     const newUserMsg: Message = { id: Date.now().toString(), sender: 'user', text, timestamp: new Date() };
     setMessages(prev => [...prev, newUserMsg]);
     setIsTyping(true);
 
+<<<<<<< HEAD
     try {
       const { response, newState } = await callAgentAPI(
         text,
@@ -670,6 +839,24 @@ export default function App() {
     } finally {
       setIsTyping(false);
     }
+=======
+    // Simulate network delay and LLM processing
+    setTimeout(() => {
+      const { response, newState } = simulateAgentGraph(text, agentState, (newApp) => {
+        // Callback to insert DB record
+        const appointment: Appointment = {
+          id: Math.random().toString(36).substr(2, 9),
+          ...newApp,
+          status: 'Confirmada'
+        };
+        setAppointments(prev => [...prev, appointment]);
+      });
+
+      setAgentState(newState);
+      setMessages(prev => [...prev, { id: Date.now().toString(), sender: 'bot', text: response, timestamp: new Date() }]);
+      setIsTyping(false);
+    }, 1500); // 1.5s delay to simulate thinking
+>>>>>>> 72e8eb7af575437c4a798e179ec2623144687ee1
   };
 
   return (
