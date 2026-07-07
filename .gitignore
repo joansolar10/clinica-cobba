@@ -22,8 +22,5 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-<<<<<<< HEAD
 backend/venv/
 backend/.env
-=======
->>>>>>> 72e8eb7af575437c4a798e179ec2623144687ee1
