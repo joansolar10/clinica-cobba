@@ -18,6 +18,10 @@ load_dotenv()  # Carga GROQ_API_KEY desde .env
 # Importar el agente (después de cargar .env para que tenga la key)
 from agent import run_agent
 from deep_agent import run_deep_agent
+from database import (
+    get_all_appointments, create_appointment,
+    update_appointment_status, get_all_patients, get_or_create_patient
+)
 
 app = FastAPI(title="Clínica Cobba — LangGraph API", version="1.0.0")
 
@@ -85,6 +89,58 @@ async def deep_agent(req: DeepAgentRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error del Deep Agent: {str(e)}")
     return DeepAgentResponse(alerts=alerts)
+
+# ── Supabase — Citas ─────────────────────────────────────────────────────
+class AppointmentCreate(BaseModel):
+    patient_name: str
+    dni: str
+    doctor: str
+    specialty: str
+    date: str
+    time: str
+    status: Optional[str] = "Confirmada"
+
+class AppointmentStatusUpdate(BaseModel):
+    status: str
+
+@app.get("/appointments")
+async def list_appointments():
+    try:
+        return await get_all_appointments()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/appointments")
+async def add_appointment(req: AppointmentCreate):
+    try:
+        # Asegurar que el paciente existe en la tabla patients
+        names = req.patient_name.strip().split(" ", 1)
+        first = names[0]
+        last  = names[1] if len(names) > 1 else ""
+        await get_or_create_patient(first, last, req.dni)
+
+        appt = await create_appointment(
+            req.patient_name, req.dni, req.doctor,
+            req.specialty, req.date, req.time, req.status or "Confirmada"
+        )
+        return appt
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.patch("/appointments/{appointment_id}")
+async def patch_appointment(appointment_id: str, req: AppointmentStatusUpdate):
+    try:
+        return await update_appointment_status(appointment_id, req.status)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── Supabase — Pacientes ──────────────────────────────────────────────────
+@app.get("/patients")
+async def list_patients():
+    try:
+        return await get_all_patients()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── Health check ──────────────────────────────────────────────────────────
 @app.get("/health")
