@@ -25,7 +25,7 @@ def _headers() -> dict:
 # FUNCIONES SÍNCRONAS — para usar dentro del agente LangGraph
 # ══════════════════════════════════════════════════════════════════════════
 
-ALL_SPECIALTIES = ["Cardiología", "Pediatría", "Dermatología", "Medicina General", "Ginecología"]
+ALL_SPECIALTIES = ["Odontología General", "Ortodoncia", "Endodoncia", "Periodoncia", "Implantología", "Odontopediatría"]
 
 
 def match_specialty(text: str) -> Optional[str]:
