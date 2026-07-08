@@ -25,66 +25,91 @@ def _headers() -> dict:
 # FUNCIONES SÍNCRONAS — para usar dentro del agente LangGraph
 # ══════════════════════════════════════════════════════════════════════════
 
-ALL_SPECIALTIES = ["Cardiología", "Pediatría", "Dermatología", "Medicina General", "Ginecología"]
-
-
-def match_specialty(text: str) -> Optional[str]:
-    """
-    Intenta encontrar una especialidad real a partir de texto libre.
-    Devuelve el nombre canónico si hay coincidencia, o None si no
-    ofrecemos esa especialidad (en vez de asumir Medicina General en silencio).
-    """
-    t = (text or "").strip().lower()
-    if not t:
-        return None
-    for s in ALL_SPECIALTIES:
-        if s.lower() in t or t in s.lower():
-            return s
-    return None
-
-
 def sync_get_available_slots(specialty: str) -> list[dict]:
     """
-    Devuelve los horarios disponibles (sin ocupar) para una especialidad YA
-    VALIDADA (usar match_specialty antes de llamar esta función).
-    Lee la tabla schedule_slots y filtra los que ya están reservados
-    en la tabla appointments.
+    Devuelve los horarios disponibles para una especialidad,
+    excluyendo los que ya están ocupados en Supabase.
+    Retorna lista de {doctor, date, time, specialty}.
     """
+    # Catálogo de horarios posibles por especialidad
+    catalog = {
+        "Odontología General": [
+            {"doctor": "Dr. Quispe",   "date": "2026-07-08", "time": "09:00"},
+            {"doctor": "Dr. Quispe",   "date": "2026-07-08", "time": "11:00"},
+            {"doctor": "Dr. Quispe",   "date": "2026-07-09", "time": "09:00"},
+            {"doctor": "Dra. Vega",    "date": "2026-07-09", "time": "10:30"},
+            {"doctor": "Dra. Vega",    "date": "2026-07-10", "time": "08:00"},
+            {"doctor": "Dra. Vega",    "date": "2026-07-11", "time": "12:00"},
+        ],
+        "Ortodoncia": [
+            {"doctor": "Dra. Paz",     "date": "2026-07-08", "time": "10:00"},
+            {"doctor": "Dra. Paz",     "date": "2026-07-09", "time": "14:00"},
+            {"doctor": "Dr. Salinas",  "date": "2026-07-10", "time": "11:00"},
+            {"doctor": "Dr. Salinas",  "date": "2026-07-11", "time": "09:00"},
+        ],
+        "Endodoncia": [
+            {"doctor": "Dr. Flores",   "date": "2026-07-08", "time": "08:00"},
+            {"doctor": "Dr. Flores",   "date": "2026-07-09", "time": "15:00"},
+            {"doctor": "Dr. Flores",   "date": "2026-07-10", "time": "10:00"},
+        ],
+        "Periodoncia": [
+            {"doctor": "Dra. Torres",  "date": "2026-07-08", "time": "16:00"},
+            {"doctor": "Dra. Torres",  "date": "2026-07-10", "time": "09:00"},
+            {"doctor": "Dra. Torres",  "date": "2026-07-11", "time": "14:00"},
+        ],
+        "Implantología": [
+            {"doctor": "Dr. Mendoza",  "date": "2026-07-09", "time": "08:00"},
+            {"doctor": "Dr. Mendoza",  "date": "2026-07-11", "time": "10:00"},
+        ],
+        "Odontopediatría": [
+            {"doctor": "Dra. Ríos",    "date": "2026-07-08", "time": "09:00"},
+            {"doctor": "Dra. Ríos",    "date": "2026-07-09", "time": "11:00"},
+            {"doctor": "Dra. Ríos",    "date": "2026-07-10", "time": "16:00"},
+        ],
+        "Cirugía Oral": [
+            {"doctor": "Dr. Silva",    "date": "2026-07-09", "time": "09:00"},
+            {"doctor": "Dr. Silva",    "date": "2026-07-10", "time": "14:00"},
+            {"doctor": "Dr. Silva",    "date": "2026-07-11", "time": "11:00"},
+        ],
+    }
+
+    # Buscar la especialidad (case-insensitive, coincidencia parcial)
+    specialty_lower = specialty.lower()
+    matched_key = next(
+        (k for k in catalog if k.lower() in specialty_lower or specialty_lower in k.lower()),
+        "Odontología General"
+    )
+    possible = catalog[matched_key]
+
+    # Consultar citas ya ocupadas en Supabase
     try:
         with httpx.Client(timeout=5.0) as client:
             res = client.get(
-                f"{SUPABASE_URL}/rest/v1/schedule_slots",
-                headers=_headers(),
-                params={
-                    "specialty": f"eq.{specialty}",
-                    "select": "doctor_name,specialty,date,time",
-                    "order": "date.asc,time.asc",
-                },
-            )
-            possible = res.json() if res.status_code == 200 else []
-            possible = [
-                {"doctor": s["doctor_name"], "date": s["date"], "time": s["time"], "specialty": s["specialty"]}
-                for s in possible
-            ]
-
-            occ_res = client.get(
                 f"{SUPABASE_URL}/rest/v1/appointments",
                 headers=_headers(),
                 params={
-                    "specialty": f"eq.{specialty}",
+                    "specialty": f"ilike.%{matched_key}%",
                     "status": "neq.Cancelada",
                     "select": "doctor,date,time",
                 },
             )
-            occupied = occ_res.json() if occ_res.status_code == 200 else []
+            occupied = res.json() if res.status_code == 200 else []
     except Exception:
-        return []
+        occupied = []
 
+    # Filtrar los que ya están ocupados
     occupied_set = {
         (o.get("doctor", ""), str(o.get("date", "")), str(o.get("time", "")))
         for o in occupied
     }
-    return [s for s in possible if (s["doctor"], s["date"], s["time"]) not in occupied_set]
+
+    available = [
+        {**slot, "specialty": matched_key}
+        for slot in possible
+        if (slot["doctor"], slot["date"], slot["time"]) not in occupied_set
+    ]
+
+    return available
 
 
 def sync_check_slot(doctor: str, date: str, time: str) -> bool:
@@ -109,9 +134,10 @@ def sync_check_slot(doctor: str, date: str, time: str) -> bool:
 
 
 def sync_get_doctors_by_specialty(specialty: str) -> list[str]:
-    """Devuelve lista de médicos (nombres únicos) que atienden la especialidad dada."""
+    """Devuelve lista de médicos que atienden la especialidad dada."""
     slots = sync_get_available_slots(specialty)
-    return sorted({s["doctor"] for s in slots})
+    doctors = list({s["doctor"] for s in slots})
+    return doctors
 
 
 def sync_get_slots_for_doctor(doctor: str, specialty: str) -> list[dict]:
@@ -120,44 +146,18 @@ def sync_get_slots_for_doctor(doctor: str, specialty: str) -> list[dict]:
     return [s for s in slots if doctor.lower() in s["doctor"].lower()]
 
 
-def nearest_slots(slots: list[dict], date_req: str, time_req: str, n: int = 5) -> list[dict]:
-    """
-    Ordena una lista de slots por cercanía temporal a la fecha/hora pedida
-    por el paciente, y devuelve los `n` más cercanos. Útil para sugerir
-    alternativas cuando el horario solicitado no está disponible.
-    """
-    from datetime import datetime
-
-    try:
-        target = datetime.strptime(f"{date_req} {time_req or '09:00'}", "%Y-%m-%d %H:%M")
-    except ValueError:
-        return slots[:n]
-
-    def _dist(s):
-        try:
-            dt = datetime.strptime(f"{s['date']} {s['time']}", "%Y-%m-%d %H:%M")
-            return abs((dt - target).total_seconds())
-        except ValueError:
-            return float("inf")
-
-    return sorted(slots, key=_dist)[:n]
-
-
 # ══════════════════════════════════════════════════════════════════════════
 # FUNCIONES ASYNC — para los endpoints FastAPI
 # ══════════════════════════════════════════════════════════════════════════
 
 async def get_or_create_patient(first_name: str, last_name: str, dni: str) -> dict:
     """Busca paciente por DNI, lo crea si no existe."""
-    dni = (dni or "").strip()
     async with httpx.AsyncClient() as client:
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/patients",
             headers=_headers(),
             params={"dni": f"eq.{dni}", "select": "*"},
         )
-        if res.status_code != 200:
-            raise Exception(f"Supabase GET /patients falló ({res.status_code}): {res.text}")
         data = res.json()
         if data:
             return data[0]
@@ -167,16 +167,7 @@ async def get_or_create_patient(first_name: str, last_name: str, dni: str) -> di
             headers=_headers(),
             json={"first_name": first_name, "last_name": last_name, "dni": dni},
         )
-        if res.status_code not in (200, 201):
-            raise Exception(f"Supabase POST /patients falló ({res.status_code}): {res.text}")
-        data = res.json()
-        if not data:
-            raise Exception(
-                "Supabase no devolvió el paciente creado. Revisa que el header "
-                "'Prefer: return=representation' funcione y que la policy de INSERT "
-                "en 'patients' esté activa."
-            )
-        return data[0]
+        return res.json()[0]
 
 async def get_all_patients() -> list:
     async with httpx.AsyncClient() as client:
@@ -211,7 +202,7 @@ async def create_appointment(
             headers=_headers(),
             json={
                 "patient_name": patient_name,
-                "dni": (dni or "").strip(),
+                "dni": dni,
                 "doctor": doctor,
                 "specialty": specialty,
                 "date": date,
@@ -219,16 +210,7 @@ async def create_appointment(
                 "status": status,
             },
         )
-        if res.status_code not in (200, 201):
-            # Aquí verás el motivo real: FK violation (dni no existe en patients),
-            # CHECK constraint (status inválido), RLS, etc.
-            raise Exception(f"Supabase POST /appointments falló ({res.status_code}): {res.text}")
         data = res.json()
-        if not data:
-            raise Exception(
-                "Supabase no devolvió la cita creada. Revisa la policy de INSERT "
-                "en 'appointments' y el header 'Prefer: return=representation'."
-            )
         return data[0] if isinstance(data, list) else data
 
 async def update_appointment_status(appointment_id: str, status: str) -> dict:
