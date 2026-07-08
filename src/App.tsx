@@ -1,12 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  Calendar, Users, BrainCircuit, MessageSquare, 
-  Settings, Activity, AlertCircle, CheckCircle2, 
-  Clock, LogOut, Send, Bot, User, Phone, Mail, Search,
-  CalendarDays, ChevronRight, UserCircle2
-} from 'lucide-react';
-import { 
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, LineChart, Line
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer
 } from 'recharts';
 
 // --- TYPES & MOCK DATABASE ---
@@ -617,7 +611,7 @@ export default function App() {
   
   // App State — citas cargadas desde Supabase
   const [appointments, setAppointments] = useState<Appointment[]>([]);
-  const [loadingAppointments, setLoadingAppointments] = useState(true);
+  const [, setLoadingAppointments] = useState(true);
   const [deepAgentAlerts, setDeepAgentAlerts] = useState<string[]>([]);
 
   // 1. Extraemos la lógica a una función para poder re-usarla
