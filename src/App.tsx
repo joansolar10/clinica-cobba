@@ -1,5 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
+  Calendar, Users, BrainCircuit, MessageSquare, 
+  Settings, Activity, AlertCircle, CheckCircle2, 
+  Send, Bot, User, Search,
+  CalendarDays, ChevronRight, UserCircle2
+} from 'lucide-react';
+import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer
 } from 'recharts';
 
