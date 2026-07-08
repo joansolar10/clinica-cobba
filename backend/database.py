@@ -143,6 +143,66 @@ def nearest_slots(slots: list[dict], date_req: str, time_req: str, n: int = 5) -
     return sorted(slots, key=_dist)[:n]
 
 
+def sync_get_appointments_by_dni(dni: str) -> list[dict]:
+    """
+    Devuelve las citas de un paciente identificado por su DNI. Se usa dentro
+    del agente conversacional para que el paciente pueda consultar, modificar
+    o cancelar sus propias citas.
+    """
+    dni = (dni or "").strip()
+    if not dni:
+        return []
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            res = client.get(
+                f"{SUPABASE_URL}/rest/v1/appointments",
+                headers=_headers(),
+                params={
+                    "dni": f"eq.{dni}",
+                    "select": "*",
+                    "order": "date.asc,time.asc",
+                },
+            )
+            return res.json() if res.status_code == 200 else []
+    except Exception:
+        return []
+
+
+def sync_get_appointment_by_id(appointment_id: str) -> Optional[dict]:
+    """Devuelve una cita puntual por su id, o None si no existe."""
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            res = client.get(
+                f"{SUPABASE_URL}/rest/v1/appointments",
+                headers=_headers(),
+                params={"id": f"eq.{appointment_id}", "select": "*"},
+            )
+            data = res.json() if res.status_code == 200 else []
+            return data[0] if data else None
+    except Exception:
+        return None
+
+
+def sync_update_appointment(appointment_id: str, **fields) -> Optional[dict]:
+    """
+    Actualiza campos de una cita (por ejemplo date/time para reprogramar,
+    o status para cancelar). Solo se deben pasar campos que existan en la
+    tabla appointments (date, time, doctor, specialty, status).
+    """
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            res = client.patch(
+                f"{SUPABASE_URL}/rest/v1/appointments",
+                headers=_headers(),
+                params={"id": f"eq.{appointment_id}"},
+                json=fields,
+            )
+            data = res.json() if res.status_code == 200 else []
+            return data[0] if isinstance(data, list) and data else None
+    except Exception:
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FUNCIONES ASYNC — para los endpoints FastAPI
 # ══════════════════════════════════════════════════════════════════════════
@@ -196,6 +256,31 @@ async def get_all_appointments() -> list:
         )
         return res.json()
 
+async def get_appointments_by_dni(dni: str) -> list:
+    """Versión async (para el endpoint FastAPI) de la búsqueda de citas por DNI."""
+    dni = (dni or "").strip()
+    async with httpx.AsyncClient() as client:
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/appointments",
+            headers=_headers(),
+            params={
+                "dni": f"eq.{dni}",
+                "select": "*",
+                "order": "date.asc,time.asc",
+            },
+        )
+        return res.json() if res.status_code == 200 else []
+
+async def get_appointment_by_id(appointment_id: str) -> Optional[dict]:
+    async with httpx.AsyncClient() as client:
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/appointments",
+            headers=_headers(),
+            params={"id": f"eq.{appointment_id}", "select": "*"},
+        )
+        data = res.json() if res.status_code == 200 else []
+        return data[0] if data else None
+
 async def create_appointment(
     patient_name: str,
     dni: str,
@@ -238,6 +323,18 @@ async def update_appointment_status(appointment_id: str, status: str) -> dict:
             headers=_headers(),
             params={"id": f"eq.{appointment_id}"},
             json={"status": status},
+        )
+        data = res.json()
+        return data[0] if isinstance(data, list) and data else {}
+
+async def update_appointment_datetime(appointment_id: str, date: str, time: str, status: str = "Confirmada") -> dict:
+    """Reprograma una cita existente a una nueva fecha/hora."""
+    async with httpx.AsyncClient() as client:
+        res = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/appointments",
+            headers=_headers(),
+            params={"id": f"eq.{appointment_id}"},
+            json={"date": date, "time": time, "status": status},
         )
         data = res.json()
         return data[0] if isinstance(data, list) and data else {}
