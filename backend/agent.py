@@ -1,19 +1,9 @@
 """
-Agente LangGraph para Clínica Cobba — v3 (flujo especialidad → doctor → horario)
+Agente LangGraph para Clínica Cobba — v4
 Grafo: Router → Scheduler / Escalation / Fallback
 
-Cambios respecto a v2:
-- Flujo de agendamiento en 3 pasos reales: primero especialidad, luego
-  doctor, luego horario (antes saltaba directo a "Medicina General")
-- Validación explícita de especialidad: si el paciente pide una que no
-  existe, se le dice claramente y se le listan las que sí hay (antes
-  caía en silencio a Medicina General)
-- Cuando un horario pedido no está disponible, se calculan (con fechas
-  reales, no con el LLM) las 5 alternativas más cercanas en el tiempo,
-  cruzando todos los doctores de la especialidad
-- El clasificador de intención ahora recibe los últimos mensajes de la
-  conversación como contexto, para no reinterpretar un "no, gracias"
-  como un nuevo pedido de cita
+Cambios:
+- Se añadió flujo para consultar, cancelar y modificar citas usando DNI.
 """
 
 from typing import TypedDict, Literal, Optional
@@ -29,6 +19,8 @@ from database import (
     match_specialty,
     nearest_slots,
     ALL_SPECIALTIES,
+    sync_get_appointments_by_dni,
+    sync_update_appointment
 )
 
 # ── LLM ───────────────────────────────────────────────────────────────────
@@ -85,10 +77,8 @@ def router_node(state: AgentState) -> AgentState:
         return state
 
     history = state.get("conversation_history", [])
-    prompt = f"""Eres un clasificador de intenciones para el chat de una clínica médica peruana.
-Ten en cuenta la conversación reciente para no malinterpretar respuestas cortas
-(por ejemplo "no, gracias" o "eso es todo" después de que el asistente preguntó
-"¿algo más en lo que pueda ayudarte?" NO es un pedido de agendar cita, es un cierre).
+    prompt = f"""Eres un clasificador de intenciones para el chat de una clínica odontológica peruana.
+Ten en cuenta la conversación reciente para no malinterpretar respuestas cortas.
 
 Conversación reciente:
 {_history_text(history)}
@@ -96,16 +86,18 @@ Conversación reciente:
 Nuevo mensaje del paciente: "{state['user_input']}"
 
 Responde SOLO con una palabra (sin explicación), la intención del NUEVO mensaje:
-agendar | cancelar | consultar | humano | desconocido
+agendar | cancelar | consultar | modificar | humano | desconocido
 """
     result = llm.invoke([SystemMessage(content=prompt)])
     intent = result.content.strip().lower().split()[0]
-    valid = {"agendar", "cancelar", "consultar", "humano"}
+    valid = {"agendar", "cancelar", "consultar", "modificar", "humano"}
     intent = intent if intent in valid else "desconocido"
 
     new_step = state["step"]
     if intent == "agendar":
         new_step = "specialty_prompt"
+    elif intent in ("consultar", "cancelar", "modificar"):
+        new_step = "asking_dni_for_action"
     elif intent == "humano":
         new_step = "handoff"
 
@@ -126,8 +118,160 @@ def scheduler_node(state: AgentState) -> AgentState:
         return {**state, "extracted": extracted, "step": new_step,
                 "response": text, "conversation_history": history, **extra_state}
 
-    # ── PASO 0: Mostrar menú de especialidades (no interpreta el mensaje
-    #            que disparó "agendar", solo presenta el menú) ─────────────
+    # ── PASOS PARA CONSULTAR / CANCELAR / MODIFICAR (NUEVO) ────────────────
+    if step == "asking_dni_for_action":
+        response = "Para buscar tus citas, por favor ingresa tu **número de DNI** (8 dígitos):"
+        return _reply(response, "processing_dni_for_action")
+
+    if step == "processing_dni_for_action":
+        dni = re.sub(r"[^0-9]", "", user_input)
+        if len(dni) < 8:
+            response = "❌ El DNI parece inválido. Por favor, ingresa tus 8 dígitos:"
+            return _reply(response, "processing_dni_for_action")
+        
+        citas = sync_get_appointments_by_dni(dni)
+        citas_activas = [c for c in citas if c["status"] not in ("Cancelada", "No-Show")]
+        
+        if not citas_activas:
+            response = f"No encontré citas pendientes asociadas al DNI {dni}. ¿En qué más te puedo ayudar?"
+            return {**state, "step": "done", "extracted": {}, "intent": None, "response": response, "conversation_history": history}
+
+        extracted["citas_activas"] = citas_activas
+        texto_citas = "\n".join(
+            f"{i+1}. {c['specialty']} con {c['doctor']} - {c['date']} a las {c['time']}"
+            for i, c in enumerate(citas_activas)
+        )
+        
+        if state["intent"] == "consultar":
+            response = f"Aquí tienes tus citas activas:\n\n{texto_citas}\n\n¿Hay algo más que pueda hacer por ti?"
+            return {**state, "step": "done", "extracted": {}, "intent": None, "response": response, "conversation_history": history}
+        
+        elif state["intent"] == "cancelar":
+            response = f"Encontré estas citas:\n\n{texto_citas}\n\nPor favor, dime el **número** de la cita que deseas cancelar."
+            return _reply(response, "select_appointment_for_cancel")
+            
+        elif state["intent"] == "modificar":
+            response = f"Encontré estas citas:\n\n{texto_citas}\n\nPor favor, dime el **número** de la cita que deseas reprogramar."
+            return _reply(response, "select_appointment_for_modify")
+
+    if step == "select_appointment_for_cancel":
+        citas_activas = extracted.get("citas_activas", [])
+        m = re.search(r"\d+", user_input)
+        if m:
+            idx = int(m.group(0)) - 1
+            if 0 <= idx < len(citas_activas):
+                cita_elegida = citas_activas[idx]
+                sync_update_appointment(cita_elegida["id"], status="Cancelada")
+                response = f"✅ Tu cita de {cita_elegida['specialty']} ha sido cancelada exitosamente.\n\n¿Puedo ayudarte con algo más?"
+                return {**state, "step": "done", "extracted": {}, "intent": None, "response": response, "conversation_history": history}
+                
+        response = "No entendí a qué cita te refieres. Por favor responde con el **número** de la cita que deseas cancelar."
+        return _reply(response, "select_appointment_for_cancel")
+
+    if step == "select_appointment_for_modify":
+        citas_activas = extracted.get("citas_activas", [])
+        m = re.search(r"\d+", user_input)
+        if m:
+            idx = int(m.group(0)) - 1
+            if 0 <= idx < len(citas_activas):
+                cita_elegida = citas_activas[idx]
+                extracted["cita_a_modificar"] = cita_elegida
+                extracted["specialty"] = cita_elegida["specialty"]
+                
+                slots = sync_get_available_slots(cita_elegida["specialty"])
+                extracted["available_slots"] = slots
+                
+                if not slots:
+                    response = f"Lo siento, no hay otros horarios disponibles para {cita_elegida['specialty']} en este momento."
+                    return {**state, "step": "done", "extracted": {}, "intent": None, "response": response, "conversation_history": history}
+
+                slots_text = _slots_to_text(slots, show_doctor=True)
+                response = (f"Vamos a reprogramar tu cita de {cita_elegida['specialty']} (actualmente {cita_elegida['date']} {cita_elegida['time']}).\n\n"
+                            f"Estos son los nuevos horarios disponibles:\n\n{slots_text}\n\n"
+                            f"¿Qué número de horario prefieres? O dime una fecha/hora distinta.")
+                return _reply(response, "slot_pick_for_modify")
+                
+        response = "No entendí. Por favor responde con el **número** de la cita que deseas reprogramar."
+        return _reply(response, "select_appointment_for_modify")
+
+    if step == "slot_pick_for_modify":
+        slots = extracted.get("available_slots", [])
+        specialty = extracted.get("specialty", "")
+        cita_a_modificar = extracted.get("cita_a_modificar")
+        slots_text = _slots_to_text(slots, show_doctor=True)
+
+        prompt = f"""Eres el asistente de agenda de Clínica Cobba.
+El paciente está eligiendo un NUEVO horario para reprogramar su cita de {specialty}.
+
+Horarios disponibles en la BD:
+{slots_text}
+
+Mensaje del paciente: "{user_input}"
+
+Analiza el mensaje y responde SOLO con JSON:
+{{
+  "accion": "elegir_disponible" | "pedir_alternativo" | "pedir_mas_opciones" | "cancelar",
+  "indice": <número del slot elegido (1-based), o null>,
+  "doctor_solicitado": "<nombre del doctor si lo mencionó, o null>",
+  "fecha_solicitada": "<fecha en formato YYYY-MM-DD si la mencionó, o null>",
+  "hora_solicitada": "<hora en formato HH:MM si la mencionó, o null>"
+}}
+"""
+        parsed = _parse_json(llm.invoke([SystemMessage(content=prompt)]).content)
+        accion = parsed.get("accion", "pedir_mas_opciones")
+
+        if accion == "elegir_disponible" and parsed.get("indice"):
+            idx = int(parsed["indice"]) - 1
+            if 0 <= idx < len(slots):
+                slot = slots[idx]
+                sync_update_appointment(cita_a_modificar["id"], doctor=slot["doctor"], date=slot["date"], time=slot["time"])
+                response = (
+                    f"✅ ¡Perfecto! Tu cita ha sido reprogramada con **{slot['doctor']}** "
+                    f"para el **{slot['date']}** a las **{slot['time']}**.\n\n"
+                    f"¿Hay algo más en lo que pueda ayudarte?"
+                )
+                return {**state, "step": "done", "extracted": {}, "intent": None, "response": response, "conversation_history": history}
+
+        if accion == "pedir_alternativo":
+            doc_req  = parsed.get("doctor_solicitado") or ""
+            date_req = parsed.get("fecha_solicitada") or ""
+            time_req = parsed.get("hora_solicitada") or ""
+
+            if doc_req and not date_req:
+                doc_slots = sync_get_slots_for_doctor(doc_req, specialty)
+                if doc_slots:
+                    extracted["available_slots"] = doc_slots
+                    response = f"Para **{doc_req}** tengo estos horarios:\n\n{_slots_to_text(doc_slots, show_doctor=False)}\n\n¿Cuál te conviene?"
+                    return _reply(response, "slot_pick_for_modify")
+                else:
+                    response = f"Lo siento, **{doc_req}** no tiene horarios libres. ¿Te gustaría ver otras opciones?\n\n{slots_text}"
+                    return _reply(response, "slot_pick_for_modify")
+
+            if date_req and time_req:
+                exact_match = next((s for s in slots if s["date"] == date_req and s["time"] == time_req), None)
+                is_free = exact_match and sync_check_slot(exact_match["doctor"], date_req, time_req)
+                if exact_match and is_free:
+                    sync_update_appointment(cita_a_modificar["id"], doctor=exact_match["doctor"], date=date_req, time=time_req)
+                    response = f"✅ ¡Perfecto! Tu cita ha sido reprogramada con **{exact_match['doctor']}** para el **{date_req}** a las **{time_req}**.\n\n¿Algo más?"
+                    return {**state, "step": "done", "extracted": {}, "intent": None, "response": response, "conversation_history": history}
+
+                all_specialty_slots = sync_get_available_slots(specialty)
+                alternatives = nearest_slots(all_specialty_slots, date_req, time_req, n=5)
+                if not alternatives:
+                    response = f"Lo siento, no hay horarios cercanos a {date_req} {time_req}. ¿Deseas elegir de la lista?\n\n{slots_text}"
+                    return _reply(response, "slot_pick_for_modify")
+
+                extracted["available_slots"] = alternatives
+                response = f"Ese horario no está disponible. Las opciones más cercanas son:\n\n{_slots_to_text(alternatives, show_doctor=True)}\n\n¿Cuál prefieres?"
+                return _reply(response, "slot_pick_for_modify")
+
+        if accion == "cancelar":
+            return {**state, "step": "done", "extracted": {}, "response": "Entendido, no modifiqué tu cita. ¿En qué más te ayudo?", "conversation_history": history}
+
+        response = f"No logré identificar tu elección. Los horarios disponibles son:\n\n{slots_text}\n\nElige un número o dime fecha y hora."
+        return _reply(response, "slot_pick_for_modify")
+
+    # ── PASO 0: Mostrar menú de especialidades ────────────────────────────────
     if step == "specialty_prompt":
         opciones = "\n".join(f"{i}. {s}" for i, s in enumerate(ALL_SPECIALTIES, 1))
         response = (
@@ -138,7 +282,6 @@ def scheduler_node(state: AgentState) -> AgentState:
 
     # ── PASO 1: Extraer y validar la especialidad elegida ───────────────────
     if step == "specialty_pick":
-        # Si respondió con un número, mapearlo directo
         specialty = None
         m = re.match(r"^\s*(\d+)\s*$", user_input)
         if m and 1 <= int(m.group(1)) <= len(ALL_SPECIALTIES):
@@ -192,7 +335,6 @@ def scheduler_node(state: AgentState) -> AgentState:
                         chosen_doctor = d
                         break
                 else:
-                    # No se entendió — volver a preguntar
                     opciones = "\n".join(f"{i}. {d}" for i, d in enumerate(doctors, 1))
                     response = (
                         f"No identifiqué ese doctor. Las opciones para **{specialty}** son:\n\n"
@@ -224,7 +366,7 @@ def scheduler_node(state: AgentState) -> AgentState:
         )
         return _reply(response, "slot_pick")
 
-    # ── PASO 3: Elegir o negociar horario ───────────────────────────────────
+    # ── PASO 3: Elegir o negociar horario (AGENDAR NUEVA CITA) ──────────────
     if step == "slot_pick":
         slots = extracted.get("available_slots", [])
         specialty = extracted.get("specialty", "")
@@ -268,7 +410,6 @@ Analiza el mensaje y responde SOLO con JSON:
             date_req = parsed.get("fecha_solicitada") or ""
             time_req = parsed.get("hora_solicitada") or ""
 
-            # Pidió un doctor específico distinto al filtro actual
             if doc_req and not date_req:
                 doc_slots = sync_get_slots_for_doctor(doc_req, specialty)
                 if doc_slots:
@@ -286,7 +427,6 @@ Analiza el mensaje y responde SOLO con JSON:
                     )
                     return _reply(response, "slot_pick")
 
-            # Pidió fecha y hora específica
             if date_req and time_req:
                 exact_match = next(
                     (s for s in slots if s["date"] == date_req and s["time"] == time_req), None
@@ -302,8 +442,6 @@ Analiza el mensaje y responde SOLO con JSON:
                     )
                     return _reply(response, "asking_first_name")
 
-                # No disponible: calcular las 5 alternativas más cercanas de
-                # TODA la especialidad (cruzando doctores), no solo del filtro actual
                 all_specialty_slots = sync_get_available_slots(specialty)
                 alternatives = nearest_slots(all_specialty_slots, date_req, time_req, n=5)
 
@@ -316,7 +454,7 @@ Analiza el mensaje y responde SOLO con JSON:
                     return _reply(response, "specialty_prompt")
 
                 extracted["available_slots"] = alternatives
-                extracted["doctor_filter"] = None  # las alternativas cruzan doctores
+                extracted["doctor_filter"] = None
                 response = (
                     f"Ese horario ({date_req} a las {time_req}) no está disponible. "
                     f"Estas son las 5 opciones más cercanas:\n\n"
@@ -330,7 +468,6 @@ Analiza el mensaje y responde SOLO con JSON:
                     "response": "Entendido, cancelé el proceso. ¿En qué más puedo ayudarte?",
                     "conversation_history": history}
 
-        # Fallback — mostrar opciones de nuevo
         response = (
             f"No logré identificar tu elección. Los horarios disponibles son:\n\n"
             f"{slots_text}\n\nElige un número o dime el día y hora que prefieres."
@@ -415,12 +552,12 @@ def fallback_node(state: AgentState) -> AgentState:
     history = state.get("conversation_history", [])
     history_text = _history_text(history)
 
-    prompt = f"""Eres el asistente virtual de la Clínica Cobba, una clínica médica peruana.
+    prompt = f"""Eres el asistente virtual de la Clínica Cobba, una clínica odontológica peruana.
 Responde de forma amable y concisa en español.
 Si el usuario quiere agendar una cita, dile que escriba "quiero agendar una cita".
+Si quiere consultar, modificar o cancelar sus citas, dile que te lo pida directamente.
 Si quiere hablar con un humano, dile que escriba "hablar con recepción".
-NO propongas agendar una cita a menos que el paciente lo haya pedido explícitamente
-en su nuevo mensaje.
+NO propongas agendar una cita a menos que el paciente lo haya pedido explícitamente.
 
 Historial reciente:
 {history_text}
@@ -437,6 +574,8 @@ Nuevo mensaje: "{state['user_input']}"
 SCHEDULER_STEPS = (
     "specialty_prompt", "specialty_pick", "doctor_pick", "slot_pick",
     "asking_first_name", "asking_last_name", "asking_dni", "ready_to_schedule",
+    "asking_dni_for_action", "processing_dni_for_action", 
+    "select_appointment_for_cancel", "select_appointment_for_modify", "slot_pick_for_modify"
 )
 
 def route_main(state: AgentState) -> str:
@@ -450,7 +589,7 @@ def route_main(state: AgentState) -> str:
 def route_after_router(state: AgentState) -> str:
     if state["step"] == "handoff":
         return "escalation"
-    if state["step"] == "specialty_prompt":
+    if state["step"] in ("specialty_prompt", "asking_dni_for_action"):
         return "scheduler"
     return "fallback"
 
