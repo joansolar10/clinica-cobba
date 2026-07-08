@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
 import os
+import traceback
 
 load_dotenv()  # Carga GROQ_API_KEY desde .env
 
@@ -129,6 +130,8 @@ async def add_appointment(req: AppointmentCreate):
         )
         return appt
     except Exception as e:
+        print("── ERROR creando cita ──")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.patch("/appointments/{appointment_id}")

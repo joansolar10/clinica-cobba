@@ -266,7 +266,7 @@ const AdminDashboard = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-50">
-                      {appointments.slice(0, 5).map(app => (
+                      {appointments.slice(-5).reverse().map(app => (
                         <tr key={app.id} className="hover:bg-slate-50 transition group">
                           <td className="p-4">
                             <div className="font-medium text-slate-800">{app.patientName}</div>
@@ -726,15 +726,32 @@ export default function App() {
                 status: saved.status,
               };
               setAppointments(prev => [...prev, appointment]);
+            } else {
+              // El backend respondió pero con error (ej. 500) — no fingir éxito
+              const errBody = await res.json().catch(() => ({}));
+              console.error('No se pudo guardar la cita en Supabase:', res.status, errBody);
+              setMessages(prev => [
+                ...prev,
+                {
+                  id: (Date.now() + 1).toString(),
+                  sender: 'bot',
+                  text: '⚠️ Tu cita no se pudo guardar en el sistema (error del servidor). Por favor intenta de nuevo o contacta a recepción.',
+                  timestamp: new Date(),
+                },
+              ]);
             }
-          } catch {
-            // Fallback local si falla Supabase
-            const appointment: Appointment = {
-              id: Math.random().toString(36).substr(2, 9),
-              ...newApp,
-              status: 'Confirmada',
-            };
-            setAppointments(prev => [...prev, appointment]);
+          } catch (err) {
+            // Falla de red real (backend caído, sin conexión, etc.) — tampoco fingir éxito
+            console.error('Error de red al guardar la cita:', err);
+            setMessages(prev => [
+              ...prev,
+              {
+                id: (Date.now() + 1).toString(),
+                sender: 'bot',
+                text: '⚠️ No se pudo conectar con el servidor para guardar tu cita. Verifica tu conexión e intenta de nuevo.',
+                timestamp: new Date(),
+              },
+            ]);
           }
         }
       );
