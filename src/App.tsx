@@ -45,6 +45,7 @@ interface AgentState {
     dni?: string;
   };
   step: ChatStep;
+  conversationHistory: { role: string; content: string }[];
 }
 
 const mockAppointments: Appointment[] = [
@@ -82,6 +83,7 @@ async function callAgentAPI(
         step: currentState.step,
         intent: currentState.intent,
         extracted: currentState.extractedData,
+        conversation_history: currentState.conversationHistory ?? [],
       },
     }),
   });
@@ -102,6 +104,7 @@ async function callAgentAPI(
     intent: data.state.intent ?? null,
     step: data.state.step ?? 'idle',
     extractedData: data.state.extracted ?? {},
+    conversationHistory: data.state.conversation_history ?? [],
   };
 
   return { response: data.response, newState };
@@ -655,7 +658,7 @@ export default function App() {
     { id: '1', sender: 'bot', text: '¡Hola! Soy el asistente virtual de la Clínica Cobba. ¿En qué te puedo ayudar hoy?', timestamp: new Date() }
   ]);
   const [isTyping, setIsTyping] = useState(false);
-  const [agentState, setAgentState] = useState<AgentState>({ intent: null, extractedData: {}, step: 'idle' });
+  const [agentState, setAgentState] = useState<AgentState>({ intent: null, extractedData: {}, step: 'idle', conversationHistory: [] });
 
   // Deep Agent — llama al backend real para análisis de patrones
   const [isDeepAgentRunning, setIsDeepAgentRunning] = useState(false);
