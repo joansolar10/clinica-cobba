@@ -32,18 +32,14 @@ INSERT INTO patients (first_name, last_name, dni) VALUES
   ('Carlos',  'Ruiz',    '72345678'),
   ('Ana',     'Gomez',   '45678912'),
   ('Luis',    'Merino',  '12345678'),
-  ('Sofia',   'Castro',  '76543210'),
-  ('Pedro',   'Huaman',  '87654321'),
-  ('Rosa',    'Linares', '11223344')
+  ('Sofia',   'Castro',  '76543210')
 ON CONFLICT (dni) DO NOTHING;
 
 INSERT INTO appointments (patient_name, dni, doctor, specialty, date, time, status) VALUES
-  ('Carlos Ruiz',   '72345678', 'Dr. Quispe',   'Odontología General', '2026-07-07', '09:00', 'Confirmada'),
-  ('Ana Gomez',     '45678912', 'Dra. Paz',     'Ortodoncia',          '2026-07-07', '10:30', 'Pendiente'),
-  ('Luis Merino',   '12345678', 'Dr. Flores',   'Endodoncia',          '2026-07-08', '08:00', 'No-Show'),
-  ('Sofia Castro',  '76543210', 'Dra. Torres',  'Periodoncia',         '2026-07-08', '16:00', 'Confirmada'),
-  ('Pedro Huaman',  '87654321', 'Dr. Mendoza',  'Implantología',       '2026-07-09', '08:00', 'Confirmada'),
-  ('Rosa Linares',  '11223344', 'Dra. Ríos',    'Odontopediatría',     '2026-07-09', '11:00', 'Pendiente')
+  ('Carlos Ruiz',   '72345678', 'Dr. Silva',    'Cardiología',   '2026-07-07', '09:00', 'Confirmada'),
+  ('Ana Gomez',     '45678912', 'Dra. Paz',     'Pediatría',     '2026-07-07', '10:30', 'Pendiente'),
+  ('Luis Merino',   '12345678', 'Dr. Silva',    'Cardiología',   '2026-07-08', '11:00', 'No-Show'),
+  ('Sofia Castro',  '76543210', 'Dra. Torres',  'Dermatología',  '2026-07-08', '15:00', 'Confirmada')
 ON CONFLICT DO NOTHING;
 
 -- ── RLS: habilitar Row Level Security ────────────────────────
