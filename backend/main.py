@@ -49,6 +49,7 @@ class ChatResponse(BaseModel):
     response: str
     state: dict                    # Nuevo estado que el frontend debe guardar
     new_appointment: Optional[dict] = None  # Si hay cita creada
+    refresh_data: Optional[bool] = False    # NUEVO: Flag para refrescar paneles
 
 # ── Endpoint principal ────────────────────────────────────────────────────
 @app.post("/chat", response_model=ChatResponse)
@@ -61,20 +62,32 @@ async def chat(req: ChatRequest):
         "extracted": {}, "conversation_history": []
     }
 
+    # Guardamos el intent anterior para saber qué acción se estaba realizando
+    previous_intent = current_state.get("intent")
+
     try:
         result = run_agent(req.message, current_state)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error del agente: {str(e)}")
 
+    new_step = result.get("step")
+    
+    # Lógica para avisar al frontend que recargue los paneles de la base de datos
+    # Si estábamos cancelando o modificando y el agente terminó (step == "done")
+    refresh_data = False
+    if previous_intent in ("cancelar", "modificar") and new_step == "done":
+        refresh_data = True
+
     return ChatResponse(
         response=result["response"],
         state={
-            "step":                 result["step"],
-            "intent":               result["intent"],
-            "extracted":            result["extracted"],
+            "step":                 new_step,
+            "intent":               result.get("intent"),
+            "extracted":            result.get("extracted", {}),
             "conversation_history": result.get("conversation_history", []),
         },
         new_appointment=result.get("new_appointment"),
+        refresh_data=refresh_data,
     )
 
 # ── Deep Agent ───────────────────────────────────────────────────────────
