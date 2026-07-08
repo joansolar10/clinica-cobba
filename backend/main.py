@@ -55,7 +55,10 @@ async def chat(req: ChatRequest):
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="El mensaje no puede estar vacío.")
 
-    current_state = req.state or {"step": "idle", "intent": None, "extracted": {}}
+    current_state = req.state or {
+        "step": "idle", "intent": None,
+        "extracted": {}, "conversation_history": []
+    }
 
     try:
         result = run_agent(req.message, current_state)
@@ -65,9 +68,10 @@ async def chat(req: ChatRequest):
     return ChatResponse(
         response=result["response"],
         state={
-            "step": result["step"],
-            "intent": result["intent"],
-            "extracted": result["extracted"],
+            "step":                 result["step"],
+            "intent":               result["intent"],
+            "extracted":            result["extracted"],
+            "conversation_history": result.get("conversation_history", []),
         },
         new_appointment=result.get("new_appointment"),
     )
