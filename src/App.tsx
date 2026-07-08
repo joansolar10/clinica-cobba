@@ -11,7 +11,7 @@ import {
 
 // --- TYPES & MOCK DATABASE ---
 type Role = 'admin' | 'paciente';
-type Intent = 'agendar' | 'cancelar' | 'consultar' | 'humano' | 'desconocido';
+type Intent = 'agendar' | 'cancelar' | 'consultar' | 'modificar' | 'humano' | 'desconocido';
 
 interface Message {
   id: string;
@@ -31,19 +31,11 @@ interface Appointment {
   status: 'Confirmada' | 'Pendiente' | 'Cancelada' | 'No-Show';
 }
 
-type ChatStep = 'idle' | 'asking_specialty' | 'choosing_option' | 'asking_first_name' | 'asking_last_name' | 'asking_dni' | 'ready_to_schedule' | 'handoff';
+type ChatStep = 'idle' | 'asking_specialty' | 'choosing_option' | 'asking_first_name' | 'asking_last_name' | 'asking_dni' | 'ready_to_schedule' | 'handoff' | string;
 
 interface AgentState {
   intent: Intent | null;
-  extractedData: {
-    specialty?: string;
-    doctor?: string;
-    date?: string;
-    time?: string;
-    firstName?: string;
-    lastName?: string;
-    dni?: string;
-  };
+  extractedData: any;
   step: ChatStep;
   conversationHistory: { role: string; content: string }[];
 }
@@ -73,7 +65,7 @@ async function callAgentAPI(
   userInput: string,
   currentState: AgentState,
   addAppointment: (app: Omit<Appointment, 'id' | 'status'>) => void
-): Promise<{ response: string; newState: AgentState }> {
+): Promise<{ response: string; newState: AgentState; refreshData: boolean }> {
   const res = await fetch(`${BACKEND_URL}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -107,7 +99,11 @@ async function callAgentAPI(
     conversationHistory: data.state.conversation_history ?? [],
   };
 
-  return { response: data.response, newState };
+  return { 
+    response: data.response, 
+    newState,
+    refreshData: !!data.refresh_data // Capturamos el flag del backend
+  };
 }
 
 // --- COMPONENTS ---
@@ -624,32 +620,34 @@ export default function App() {
   const [loadingAppointments, setLoadingAppointments] = useState(true);
   const [deepAgentAlerts, setDeepAgentAlerts] = useState<string[]>([]);
 
+  // 1. Extraemos la lógica a una función para poder re-usarla
+  const fetchAppointments = async () => {
+    setLoadingAppointments(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/appointments`);
+      if (!res.ok) throw new Error('Error al cargar citas');
+      const data = await res.json();
+      
+      const mapped: Appointment[] = data.map((a: any) => ({
+        id: a.id,
+        patientName: a.patient_name,
+        dni: a.dni,
+        doctor: a.doctor,
+        specialty: a.specialty,
+        date: a.date,
+        time: a.time,
+        status: a.status,
+      }));
+      setAppointments(mapped);
+    } catch {
+      setAppointments(mockAppointments);
+    } finally {
+      setLoadingAppointments(false);
+    }
+  };
+
   // Cargar citas desde Supabase al montar
   useEffect(() => {
-    const fetchAppointments = async () => {
-      try {
-        const res = await fetch(`${BACKEND_URL}/appointments`);
-        if (!res.ok) throw new Error('Error al cargar citas');
-        const data = await res.json();
-        // Mapear campos snake_case de Supabase al formato del frontend
-        const mapped: Appointment[] = data.map((a: any) => ({
-          id: a.id,
-          patientName: a.patient_name,
-          dni: a.dni,
-          doctor: a.doctor,
-          specialty: a.specialty,
-          date: a.date,
-          time: a.time,
-          status: a.status,
-        }));
-        setAppointments(mapped);
-      } catch {
-        // Si falla Supabase, usar datos de ejemplo como fallback
-        setAppointments(mockAppointments);
-      } finally {
-        setLoadingAppointments(false);
-      }
-    };
     fetchAppointments();
   }, []);
   
@@ -694,7 +692,8 @@ export default function App() {
     setIsTyping(true);
 
     try {
-      const { response, newState } = await callAgentAPI(
+      // 2. Aquí recibimos el nuevo flag refreshData
+      const { response, newState, refreshData } = await callAgentAPI(
         text,
         agentState,
         async (newApp) => {
@@ -727,7 +726,6 @@ export default function App() {
               };
               setAppointments(prev => [...prev, appointment]);
             } else {
-              // El backend respondió pero con error (ej. 500) — no fingir éxito
               const errBody = await res.json().catch(() => ({}));
               console.error('No se pudo guardar la cita en Supabase:', res.status, errBody);
               setMessages(prev => [
@@ -741,7 +739,6 @@ export default function App() {
               ]);
             }
           } catch (err) {
-            // Falla de red real (backend caído, sin conexión, etc.) — tampoco fingir éxito
             console.error('Error de red al guardar la cita:', err);
             setMessages(prev => [
               ...prev,
@@ -755,11 +752,18 @@ export default function App() {
           }
         }
       );
+      
       setAgentState(newState);
       setMessages(prev => [
         ...prev,
         { id: Date.now().toString(), sender: 'bot', text: response, timestamp: new Date() },
       ]);
+
+      // 3. Si el agente completó una modificación/cancelación, refrescamos la BD en la interfaz
+      if (refreshData) {
+        await fetchAppointments();
+      }
+
     } catch (error) {
       setMessages(prev => [
         ...prev,
