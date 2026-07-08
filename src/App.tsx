@@ -49,10 +49,10 @@ interface AgentState {
 }
 
 const mockAppointments: Appointment[] = [
-  { id: '1', patientName: 'Carlos Ruiz', dni: '72345678', doctor: 'Dr. Silva', specialty: 'Cardiología', date: '2026-07-07', time: '09:00', status: 'Confirmada' },
-  { id: '2', patientName: 'Ana Gomez', dni: '45678912', doctor: 'Dra. Paz', specialty: 'Pediatría', date: '2026-07-07', time: '10:30', status: 'Pendiente' },
-  { id: '3', patientName: 'Luis Merino', dni: '12345678', doctor: 'Dr. Silva', specialty: 'Cardiología', date: '2026-07-08', time: '11:00', status: 'No-Show' },
-  { id: '4', patientName: 'Sofia Castro', dni: '76543210', doctor: 'Dra. Torres', specialty: 'Dermatología', date: '2026-07-08', time: '15:00', status: 'Confirmada' },
+  { id: '1', patientName: 'Carlos Ruiz', dni: '72345678', doctor: 'Dr. Ramírez', specialty: 'Odontología General', date: '2026-07-08', time: '08:00', status: 'Confirmada' },
+  { id: '2', patientName: 'Ana Gomez', dni: '45678912', doctor: 'Dra. Luna', specialty: 'Odontopediatría', date: '2026-07-08', time: '10:30', status: 'Pendiente' },
+  { id: '3', patientName: 'Luis Merino', dni: '12345678', doctor: 'Dra. Flores', specialty: 'Ortodoncia', date: '2026-07-08', time: '09:00', status: 'No-Show' },
+  { id: '4', patientName: 'Sofia Castro', dni: '76543210', doctor: 'Dr. Tello', specialty: 'Endodoncia', date: '2026-07-08', time: '10:00', status: 'Confirmada' },
 ];
 
 const mockStats = [
@@ -441,7 +441,7 @@ const AdminDashboard = ({
                       <h4 className="font-bold text-slate-800 text-sm">María López</h4>
                       <span className="text-xs text-slate-400">Hace 2h</span>
                     </div>
-                    <p className="text-xs text-slate-500 truncate mb-2">Consulta resuelta (Cardiología)</p>
+                    <p className="text-xs text-slate-500 truncate mb-2">Consulta resuelta (Ortodoncia)</p>
                     <span className="inline-flex items-center gap-1 bg-slate-100 text-slate-600 text-[10px] font-bold px-2 py-0.5 rounded border border-slate-200 uppercase tracking-wider">
                       Cerrado
                     </span>
