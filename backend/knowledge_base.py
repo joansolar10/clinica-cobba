@@ -32,6 +32,53 @@ Simplemente añade un nuevo dict a KB_DOCUMENTS con "id", "categoria" y
 
 from __future__ import annotations
 import re
+import unicodedata
+
+# ── Normalización de texto en español ──────────────────────────────────────
+# Sin esto, TfidfVectorizer compara palabras EXACTAS: "sábado" != "sábados",
+# "seguro" != "seguros", y palabras funcionales (de, la, el...) generan
+# similitud artificial con documentos totalmente irrelevantes.
+_SPANISH_STOPWORDS = {
+    "de", "la", "que", "el", "en", "y", "a", "los", "del", "se", "las",
+    "por", "un", "para", "con", "no", "una", "su", "al", "lo", "como",
+    "más", "pero", "sus", "le", "ya", "o", "este", "sí", "porque", "esta",
+    "entre", "cuando", "muy", "sin", "sobre", "también", "me", "hasta",
+    "hay", "donde", "quien", "desde", "todo", "nos", "durante", "todos",
+    "uno", "les", "ni", "contra", "otros", "ese", "eso", "ante", "ellos",
+    "e", "esto", "mi", "antes", "algunos", "qué", "unos", "yo", "otro",
+    "otras", "otra", "él", "tanto", "esa", "estos", "mucho", "quienes",
+    "nada", "muchos", "cual", "poco", "ella", "estas", "algunas", "algo",
+    "nosotros", "tú", "te", "ti", "tu", "tus", "ellas", "es", "son",
+    "soy", "eres", "somos", "tengo", "tiene", "tienes", "tenemos",
+    "puede", "pueden", "debe", "deben", "está", "están", "estoy",
+}
+
+
+def _strip_accents(text: str) -> str:
+    """Quita tildes: 'sábado' -> 'sabado'."""
+    nfkd = unicodedata.normalize("NFD", text)
+    return "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+
+
+def _normalize_word(word: str) -> str:
+    """Normalización morfológica ligera para reducir singular/plural al
+    mismo token: 'sábados' -> 'sabado', 'seguros' -> 'seguro'."""
+    w = _strip_accents(word)
+    if len(w) > 4 and w.endswith("es"):
+        w = w[:-2]
+    elif len(w) > 3 and w.endswith("s"):
+        w = w[:-1]
+    return w
+
+
+def _analyze(text: str) -> list[str]:
+    """Tokeniza, quita stopwords y normaliza. Usado tanto por el
+    vectorizador TF-IDF como por el fallback de conteo de palabras."""
+    raw_tokens = re.findall(r"[a-záéíóúñ0-9]+", (text or "").lower())
+    return [
+        _normalize_word(t) for t in raw_tokens
+        if t not in _SPANISH_STOPWORDS and len(t) > 1
+    ]
 
 # ── Base de conocimiento (documentos fuente para RAG) ──────────────────────
 KB_DOCUMENTS: list[dict] = [
@@ -102,19 +149,19 @@ KB_DOCUMENTS: list[dict] = [
         "id": "emergencias_dentales",
         "categoria": "Emergencias dentales",
         "contenido": (
-            "Ante una emergencia dental (dolor intenso, golpe, sangrado "
-            "abundante), el paciente debe escribir 'hablar con recepción' "
-            "para que un humano lo atienda de inmediato. El bot no debe "
-            "intentar resolver emergencias ni dar indicaciones médicas por "
-            "su cuenta."
+            "Ante una emergencia, urgencia o dolor dental (dolor intenso, "
+            "me duele mucho, golpe, sangrado abundante), el paciente debe "
+            "escribir 'hablar con recepción' para que un humano lo atienda "
+            "de inmediato. El bot no debe intentar resolver emergencias ni "
+            "dar indicaciones médicas por su cuenta."
         ),
     },
 ]
 
 
 def _tokenize(text: str) -> list[str]:
-    """Tokenización simple (minúsculas, solo letras/números) para el fallback sin sklearn."""
-    return re.findall(r"[a-záéíóúñ0-9]+", (text or "").lower())
+    """Tokenización + normalización para el fallback sin sklearn."""
+    return _analyze(text)
 
 
 def _keyword_score(query_tokens: set[str], doc_tokens: list[str]) -> float:
@@ -152,7 +199,7 @@ def retrieve_context(query: str, k: int = 3, min_score: float = 0.05) -> list[di
 
     try:
         if _SKLEARN_OK:
-            vectorizer = TfidfVectorizer()
+            vectorizer = TfidfVectorizer(tokenizer=_analyze, token_pattern=None)
             matrix = vectorizer.fit_transform(contents + [query])
             sims = cosine_similarity(matrix[-1], matrix[:-1])[0]
         else:
@@ -164,7 +211,19 @@ def retrieve_context(query: str, k: int = 3, min_score: float = 0.05) -> list[di
         return []
 
     ranked = sorted(zip(KB_DOCUMENTS, sims), key=lambda pair: pair[1], reverse=True)
-    return [doc for doc, score in ranked[:k] if score >= min_score]
+    if not ranked or ranked[0][1] < min_score:
+        return []
+
+    # Umbral relativo: un score "bueno" varía mucho según la pregunta
+    # (ej. 0.22 vs 0.08), así que en vez de un corte absoluto, nos quedamos
+    # solo con los documentos que estén razonablemente cerca del mejor
+    # resultado. Esto evita arrastrar documentos débiles/irrelevantes solo
+    # porque el mejor resultado también tuvo un score bajo.
+    top_score = ranked[0][1]
+    return [
+        doc for doc, score in ranked[:k]
+        if score >= min_score and score >= 0.4 * top_score
+    ]
 
 
 def format_context_for_prompt(docs: list[dict]) -> str:

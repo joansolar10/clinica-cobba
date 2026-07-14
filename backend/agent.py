@@ -95,12 +95,36 @@ Nuevo mensaje del paciente: "{state['user_input']}"
 # Instrucciones
 Clasifica ÚNICAMENTE el NUEVO mensaje en una de estas categorías:
 - agendar: quiere programar una cita nueva.
-- cancelar: quiere anular una cita que ya tiene.
-- consultar: quiere ver el estado o el detalle de sus citas.
-- modificar: quiere reprogramar/cambiar una cita que ya tiene.
+- cancelar: quiere anular UNA CITA PROPIA que ya tiene agendada.
+- consultar: quiere ver el estado o detalle de UNA CITA PROPIA que ya
+  tiene agendada (no información general de la clínica).
+- modificar: quiere reprogramar/cambiar UNA CITA PROPIA que ya tiene.
 - humano: pide hablar con una persona, tiene una queja o una emergencia.
-- desconocido: cualquier otro caso (saludo, duda general, pregunta sobre
-  la clínica, mensaje que no encaja en las anteriores).
+- desconocido: cualquier otro caso, incluyendo saludos, y preguntas
+  GENERALES sobre la clínica (horarios de atención, ubicación, precios,
+  seguros/convenios, qué llevar a la primera cita, especialidades
+  disponibles, políticas). Estas NO son "consultar" porque no se refieren
+  a una cita que el paciente ya tiene.
+
+# Distinción clave (la fuente más común de error)
+"consultar/cancelar/modificar" requieren que el paciente esté hablando de
+UNA CITA PROPIA YA EXISTENTE. Si la pregunta es información general sobre
+la clínica y no sobre una cita específica del paciente, es "desconocido",
+aunque use palabras como "cita", "horario" o "disponible".
+
+Ejemplos:
+- "¿A qué hora abren los sábados?" → desconocido (horario general, no una cita propia)
+- "¿Tienen atención los domingos?" → desconocido
+- "¿Aceptan mi seguro Rimac?" → desconocido
+- "¿Cuánto cuesta una limpieza?" → desconocido
+- "¿Cuándo es mi próxima cita?" → consultar (es SU cita)
+- "Quiero ver mis citas" → consultar
+- "Ya no puedo ir a mi cita del jueves" → cancelar
+- "Quiero cambiar mi cita para otro día" → modificar
+- "Quiero una cita con el ortodoncista" → agendar
+- "me duele mucho una muela, es urgente" → humano (emergencia, no es información general)
+- "tengo una queja sobre mi última visita" → humano
+- "quiero hablar con alguien de recepción" → humano
 
 # Manejo de errores
 Si el mensaje es ambiguo o no tienes suficiente certeza, clasifica como
@@ -647,6 +671,15 @@ confirme. NO inventes horarios, precios, direcciones ni políticas.
 - NO des consejos médicos ni diagnósticos; solo información administrativa
   de la clínica.
 - NO inventes datos que no estén en la base de conocimiento recuperada.
+- Si el paciente menciona un nombre propio (una aseguradora, un doctor,
+  una marca, etc.) y ese nombre específico NO aparece mencionado en la
+  base de conocimiento recuperada, NO confirmes ni niegues que aplica a
+  él. Responde de forma genérica con lo que sí dice la base de
+  conocimiento y aclara que ese dato puntual debe confirmarlo recepción.
+  Ejemplo: si preguntan "¿aceptan mi seguro Rimac?" y la base de
+  conocimiento no menciona "Rimac" explícitamente, NO respondas "sí,
+  aceptamos Rimac"; responde explicando la política general de reembolso
+  y que recepción debe confirmar si esa aseguradora específica aplica.
 
 # Historial reciente
 {history_text}
