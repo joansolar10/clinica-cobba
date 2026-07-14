@@ -84,9 +84,12 @@ def data_collector_node(state: DeepAgentState) -> DeepAgentState:
 def pattern_analyzer_node(state: DeepAgentState) -> DeepAgentState:
     summary = json.loads(state["patterns"])
 
-    prompt = f"""Eres un analista de datos clínicos experto. Analiza estos datos de una clínica médica peruana y detecta los 2 patrones más críticos que requieren acción inmediata.
+    prompt = f"""# Rol y contexto
+Eres un analista de datos clínicos experto que apoya a la gerencia de una
+clínica odontológica peruana (Clínica Cobba) a detectar problemas
+operativos a partir de datos reales de citas.
 
-Datos del análisis ({summary['fecha_analisis']}):
+# Datos del análisis ({summary['fecha_analisis']})
 - Total de citas analizadas: {summary['total_citas']}
 - Tasa de No-Show global: {summary['tasa_noshow_global']}%
 - Día con mayor tasa de No-Show: {summary['peor_dia']} ({summary['day_stats'].get(summary['peor_dia'], {}).get('tasa_noshow', 0)}%)
@@ -94,6 +97,20 @@ Datos del análisis ({summary['fecha_analisis']}):
 - Estadísticas por doctor: {json.dumps(summary['doctor_stats'], ensure_ascii=False)}
 - Estadísticas por día: {json.dumps(summary['day_stats'], ensure_ascii=False)}
 
+# Instrucciones
+Detecta los 2 patrones más críticos que requieren acción inmediata de la
+gerencia, basándote ÚNICAMENTE en los datos anteriores.
+
+# Restricciones
+- No inventes cifras ni doctores que no aparezcan en los datos.
+- Si los datos no alcanzan para dos patrones distintos, repite el patrón
+  más relevante en ambos campos en vez de inventar uno nuevo.
+
+# Manejo de errores
+Si algún dato viene vacío o en "N/A", indícalo como impacto "bajo" en vez
+de fabricar una conclusión.
+
+# Formato de salida
 Responde SOLO con un JSON con esta estructura exacta (sin explicación, sin markdown):
 {{
   "patron_1": {{
@@ -157,9 +174,13 @@ def recommendation_generator_node(state: DeepAgentState) -> DeepAgentState:
         if not patron:
             continue
 
-        prompt = f"""Eres el Deep Agent de Clínica Cobba, un sistema de IA analítica médica.
-Genera UNA recomendación ejecutiva concisa (máximo 2 oraciones) para el siguiente patrón detectado.
-La recomendación debe ser específica, accionable y profesional. Incluye el dato clave.
+        prompt = f"""# Rol
+Eres el Deep Agent de Clínica Cobba, un sistema de IA analítica médica que
+asesora a la gerencia con recomendaciones operativas.
+
+# Tarea
+Genera UNA recomendación ejecutiva concisa (máximo 2 oraciones) para el
+siguiente patrón detectado.
 
 Patrón detectado: {patron.get('descripcion')}
 Tipo: {patron.get('tipo')}
@@ -167,7 +188,14 @@ Impacto: {patron.get('impacto')}
 Dato clave: {patron.get('datos_clave')}
 Contexto adicional: Análisis del {fecha}, {data.get('total_citas')} citas analizadas.
 
-Responde SOLO con la recomendación en español, sin introducción ni listas. Una o dos oraciones directas."""
+# Restricciones
+- Usa solo el dato clave proporcionado; no inventes cifras adicionales.
+- No des indicaciones médicas, solo recomendaciones operativas/administrativas.
+- La recomendación debe ser específica, accionable y profesional.
+
+# Formato de salida
+Responde SOLO con la recomendación en español, sin introducción ni listas.
+Una o dos oraciones directas."""
 
         result = llm.invoke([SystemMessage(content=prompt)])
         recommendation = result.content.strip()

@@ -22,6 +22,7 @@ from database import (
     sync_get_appointments_by_dni,
     sync_update_appointment
 )
+from knowledge_base import retrieve_context, format_context_for_prompt
 
 # ── LLM ───────────────────────────────────────────────────────────────────
 llm = ChatGroq(
@@ -77,19 +78,42 @@ def router_node(state: AgentState) -> AgentState:
         return state
 
     history = state.get("conversation_history", [])
-    prompt = f"""Eres un clasificador de intenciones para el chat de una clínica odontológica peruana.
-Ten en cuenta la conversación reciente para no malinterpretar respuestas cortas.
+    prompt = f"""# Rol
+Eres el clasificador de intenciones del chat de Clínica Cobba, una clínica
+odontológica peruana.
+
+# Contexto
+Ten en cuenta la conversación reciente para no malinterpretar respuestas
+cortas o ambiguas (ej. "sí", "el segundo", "mañana a las 3") que solo tienen
+sentido a la luz del turno anterior.
 
 Conversación reciente:
 {_history_text(history)}
 
 Nuevo mensaje del paciente: "{state['user_input']}"
 
-Responde SOLO con una palabra (sin explicación), la intención del NUEVO mensaje:
-agendar | cancelar | consultar | modificar | humano | desconocido
+# Instrucciones
+Clasifica ÚNICAMENTE el NUEVO mensaje en una de estas categorías:
+- agendar: quiere programar una cita nueva.
+- cancelar: quiere anular una cita que ya tiene.
+- consultar: quiere ver el estado o el detalle de sus citas.
+- modificar: quiere reprogramar/cambiar una cita que ya tiene.
+- humano: pide hablar con una persona, tiene una queja o una emergencia.
+- desconocido: cualquier otro caso (saludo, duda general, pregunta sobre
+  la clínica, mensaje que no encaja en las anteriores).
+
+# Manejo de errores
+Si el mensaje es ambiguo o no tienes suficiente certeza, clasifica como
+"desconocido" en vez de adivinar una acción sensible (agendar/cancelar/
+modificar).
+
+# Formato de salida
+Responde SOLO con una palabra exacta de la lista anterior, en minúsculas,
+sin puntuación, sin comillas y sin explicación.
 """
     result = llm.invoke([SystemMessage(content=prompt)])
-    intent = result.content.strip().lower().split()[0]
+    raw = (result.content or "").strip().lower()
+    intent = raw.split()[0] if raw else "desconocido"
     valid = {"agendar", "cancelar", "consultar", "modificar", "humano"}
     intent = intent if intent in valid else "desconocido"
 
@@ -200,15 +224,27 @@ def scheduler_node(state: AgentState) -> AgentState:
         cita_a_modificar = extracted.get("cita_a_modificar")
         slots_text = _slots_to_text(slots, show_doctor=True)
 
-        prompt = f"""Eres el asistente de agenda de Clínica Cobba.
+        prompt = f"""# Rol
+Eres el asistente de agenda de Clínica Cobba.
+
+# Tarea
 El paciente está eligiendo un NUEVO horario para reprogramar su cita de {specialty}.
 
-Horarios disponibles en la BD:
+Horarios disponibles en la BD (única fuente de horarios válida):
 {slots_text}
 
 Mensaje del paciente: "{user_input}"
 
-Analiza el mensaje y responde SOLO con JSON:
+# Restricciones
+No inventes doctores, fechas ni horas que no estén en la lista anterior o
+que el paciente no haya mencionado explícitamente.
+
+# Manejo de errores
+Si el mensaje es ambiguo y no puedes determinar la elección con certeza,
+usa "pedir_mas_opciones" en vez de adivinar un índice.
+
+# Formato de salida
+Responde SOLO con este JSON (sin texto adicional, sin markdown):
 {{
   "accion": "elegir_disponible" | "pedir_alternativo" | "pedir_mas_opciones" | "cancelar",
   "indice": <número del slot elegido (1-based), o null>,
@@ -373,15 +409,27 @@ Analiza el mensaje y responde SOLO con JSON:
         doctor_filter = extracted.get("doctor_filter")
         slots_text = _slots_to_text(slots, show_doctor=(doctor_filter is None))
 
-        prompt = f"""Eres el asistente de agenda de Clínica Cobba.
+        prompt = f"""# Rol
+Eres el asistente de agenda de Clínica Cobba.
+
+# Tarea
 El paciente está eligiendo un horario para {specialty}.
 
-Horarios disponibles en la BD:
+Horarios disponibles en la BD (única fuente de horarios válida):
 {slots_text}
 
 Mensaje del paciente: "{user_input}"
 
-Analiza el mensaje y responde SOLO con JSON:
+# Restricciones
+No inventes doctores, fechas ni horas que no estén en la lista anterior o
+que el paciente no haya mencionado explícitamente.
+
+# Manejo de errores
+Si el mensaje es ambiguo y no puedes determinar la elección con certeza,
+usa "pedir_mas_opciones" en vez de adivinar un índice.
+
+# Formato de salida
+Responde SOLO con este JSON (sin texto adicional, sin markdown):
 {{
   "accion": "elegir_disponible" | "pedir_alternativo" | "pedir_mas_opciones" | "cancelar",
   "indice": <número del slot elegido (1-based), o null>,
@@ -505,9 +553,18 @@ Analiza el mensaje y responde SOLO con JSON:
 
     # ── PASO 7: Confirmación final ─────────────────────────────────────────
     if step == "ready_to_schedule":
-        prompt = f"""El usuario responde a una confirmación de cita médica.
-¿Confirma o cancela? Responde SOLO: si | no
-Mensaje: "{user_input}"
+        prompt = f"""# Rol
+Eres el asistente de agenda de Clínica Cobba, interpretando la respuesta a
+una confirmación de cita médica.
+
+# Manejo de errores
+Si el mensaje es ambiguo o no expresa una confirmación clara, responde "no"
+para evitar agendar una cita por error.
+
+# Formato de salida
+Responde SOLO con una palabra: si | no
+
+Mensaje del paciente: "{user_input}"
 """
         decision = llm.invoke([SystemMessage(content=prompt)]).content.strip().lower()
         confirmed = "si" in decision or "sí" in decision
@@ -547,25 +604,58 @@ def escalation_node(state: AgentState) -> AgentState:
     )
     return {**state, "step": "handoff", "response": response}
 
-# ── Nodo 4: FALLBACK ────────────────────────────────────────────────────────
+# ── Nodo 4: FALLBACK (con RAG sobre la base de conocimiento de la clínica) ──
 def fallback_node(state: AgentState) -> AgentState:
     history = state.get("conversation_history", [])
     history_text = _history_text(history)
+    user_input = state["user_input"]
 
-    prompt = f"""Eres el asistente virtual de la Clínica Cobba, una clínica odontológica peruana.
-Responde de forma amable y concisa en español.
-Si el usuario quiere agendar una cita, dile que escriba "quiero agendar una cita".
-Si quiere consultar, modificar o cancelar sus citas, dile que te lo pida directamente.
-Si quiere hablar con un humano, dile que escriba "hablar con recepción".
-NO propongas agendar una cita a menos que el paciente lo haya pedido explícitamente.
+    # RAG: recuperamos los fragmentos de la base de conocimiento (horarios,
+    # seguros, precios, políticas, etc.) más relevantes para la pregunta,
+    # en vez de dejar que el LLM "recuerde"/invente esos datos.
+    relevant_docs = retrieve_context(user_input, k=3)
+    kb_context = format_context_for_prompt(relevant_docs)
 
-Historial reciente:
+    prompt = f"""# Rol y contexto
+Eres el asistente virtual de Clínica Cobba, una clínica odontológica
+peruana. Atiendes pacientes por chat: resuelves dudas administrativas
+generales y los derivas al flujo correspondiente cuando corresponde.
+
+# Base de conocimiento recuperada (usar como única fuente de verdad)
+{kb_context}
+
+# Instrucciones
+1. Responde en español, de forma cálida, profesional y concisa (máx. 3-4
+   líneas).
+2. Si la base de conocimiento anterior contiene la respuesta, básate
+   ÚNICAMENTE en ella.
+3. Si el paciente quiere agendar una cita, dile que escriba
+   "quiero agendar una cita".
+4. Si quiere consultar, modificar o cancelar una cita, dile que te lo pida
+   directamente (ej. "quiero cancelar mi cita").
+5. Si quiere hablar con una persona, o describe una emergencia, dile que
+   escriba "hablar con recepción".
+
+# Manejo de errores
+Si la base de conocimiento no cubre lo que el paciente pregunta, dilo con
+honestidad ("no tengo ese dato a la mano") y ofrece que recepción se lo
+confirme. NO inventes horarios, precios, direcciones ni políticas.
+
+# Restricciones
+- NO propongas agendar una cita a menos que el paciente lo haya pedido
+  explícitamente.
+- NO des consejos médicos ni diagnósticos; solo información administrativa
+  de la clínica.
+- NO inventes datos que no estén en la base de conocimiento recuperada.
+
+# Historial reciente
 {history_text}
 
-Nuevo mensaje: "{state['user_input']}"
+# Nuevo mensaje del paciente
+"{user_input}"
 """
     response = llm.invoke([SystemMessage(content=prompt)]).content.strip()
-    history.append({"role": "user", "content": state["user_input"]})
+    history.append({"role": "user", "content": user_input})
     history.append({"role": "assistant", "content": response})
     return {**state, "response": response, "step": "idle",
             "conversation_history": history}
