@@ -22,12 +22,26 @@ from database import (
     sync_get_appointments_by_dni,
     sync_update_appointment
 )
-from knowledge_base import retrieve_context, format_context_for_prompt
+from knowledge_base import retrieve_context, format_context_for_prompt, _strip_accents
 
 # ── LLM ───────────────────────────────────────────────────────────────────
 llm = ChatGroq(
     model="llama-3.1-8b-instant",
     temperature=0.3,
+    api_key=os.environ["GROQ_API_KEY"],
+)
+
+# LLM dedicado a tareas de CLASIFICACIÓN (router de intención, parseo de
+# elección de horario/confirmación en JSON). Usa temperature=0 para ser lo
+# más determinístico posible: en pruebas reales, temperature=0.3 hizo que
+# el router clasificara al azar mensajes triviales como "cuéntame un
+# chiste" como intención "humano", sin ninguna señal de emergencia de por
+# medio. Las respuestas conversacionales del fallback SÍ se benefician de
+# algo de variedad (siguen usando `llm`), pero clasificar una categoría
+# fija no debería depender del azar.
+classifier_llm = ChatGroq(
+    model="llama-3.1-8b-instant",
+    temperature=0,
     api_key=os.environ["GROQ_API_KEY"],
 )
 
@@ -109,13 +123,117 @@ def _is_valid_name(text: str) -> bool:
         return False
     return bool(_NAME_RE.match(text))
 
+# ── Clasificación determinística de intención (capa previa al LLM) ────────
+# El router basado 100% en LLM (8B, few-shot) demostró en pruebas reales
+# que no generaliza bien a frases nuevas: confundió preguntas hipotéticas
+# de política ("si cancelo mi cita, ¿tiene costo?", "qué pasa si falto a
+# mi cita?") con acciones reales, e incluso clasificó una de esas como
+# "humano" sin ninguna señal de emergencia. Agregar más ejemplos al prompt
+# uno por uno no escala (whack-a-mole) y a veces provoca regresiones en
+# casos que ya andaban bien. Por eso los patrones de mayor riesgo/mayor
+# frecuencia se resuelven aquí con reglas simples y deterministas, y el
+# LLM solo entra para lo genuinamente ambiguo (respuestas cortas
+# dependientes del contexto, frases no cubiertas por estas reglas, etc.)
+
+def _norm_for_match(text: str) -> str:
+    """minúsculas + sin tildes, para comparar contra listas de palabras clave."""
+    return _strip_accents((text or "").lower())
+
+_HYPOTHETICAL_MARKERS = [
+    "si cancelo", "si falto", "si no voy", "si no asisto", "si me ausento",
+    "que pasa si", "que sucede si", "que ocurre si", "cual es la politica",
+    "tiene costo si", "hay penalidad si", "hay multa si", "hay recargo si",
+]
+
+_HUMANO_KEYWORDS = [
+    "urgente", "urgencia", "emergencia", "me duele", "duele mucho",
+    "dolor intenso", "sangrado", "se me cayo", "se me rompio",
+    "hablar con alguien", "hablar con recepcion", "hablar con una persona",
+    "quiero hablar con", "necesito hablar con", "atencion humana",
+    "queja", "reclamo", "reclamar", "insatisfecho",
+]
+
+_OWN_APPOINTMENT_MARKERS = [
+    "mi cita", "mis citas", "mi proxima cita", "mi cita del",
+    "la cita que tengo",
+]
+
+_GENERAL_INFO_KEYWORDS = [
+    "atienden", "atiende", "abren", "abre", "horario", "horarios",
+    "hora de atencion", "ubicacion", "direccion", "donde queda",
+    "donde estan ubicados", "como llego", "cuanto cuesta", "cuanto vale",
+    "precio", "precios", "seguro", "seguros", "convenio", "convenios",
+    "especialidad", "especialidades", "que debo llevar", "primera cita",
+    "primera vez", "requisitos", "ortodoncista", "endodoncista",
+    "periodoncista", "implantologo", "odontopediatra", "odontologo",
+    "dentista general", "especialista", "especialistas",
+]
+
+_ACTION_PATTERNS = {
+    "cancelar": [
+        "cancelar mi cita", "cancela mi cita", "anular mi cita",
+        "quiero cancelar mi", "ya no puedo ir a mi cita",
+        "ya no puedo asistir a mi cita",
+    ],
+    "modificar": [
+        "modificar mi cita", "reprogramar mi cita", "cambiar mi cita",
+        "mover mi cita", "cambiar la fecha de mi cita",
+    ],
+    "consultar": [
+        "ver mis citas", "consultar mi cita", "cuando es mi cita",
+        "cual es mi proxima cita", "mis citas pendientes",
+        "quiero ver mis citas",
+    ],
+    "agendar": [
+        "agendar una cita", "quiero una cita", "sacar una cita",
+        "programar una cita", "reservar una cita", "necesito una cita",
+        "quiero agendar",
+    ],
+}
+
+def _deterministic_intent(user_input: str) -> Optional[str]:
+    """
+    Reglas de alta confianza, evaluadas en orden de prioridad. Devuelve el
+    intent si alguna regla calza, o None para dejar la decisión al LLM.
+    """
+    low = _norm_for_match(user_input)
+
+    # 1. Preguntas hipotéticas/de política ("si cancelo...", "qué pasa
+    #    si...") SIEMPRE son información general, incluso si mencionan
+    #    "mi cita" — no son una acción real que el paciente esté pidiendo.
+    if any(m in low for m in _HYPOTHETICAL_MARKERS):
+        return "desconocido"
+
+    # 2. Señales claras de emergencia / queja / pedir un humano.
+    if any(k in low for k in _HUMANO_KEYWORDS):
+        return "humano"
+
+    # 3. Frases de acción explícitas sobre una cita propia.
+    for intent, patterns in _ACTION_PATTERNS.items():
+        if any(p in low for p in patterns):
+            return intent
+
+    # 4. Pregunta de información general SIN referencia posesiva a una
+    #    cita propia -> desconocido (evita que "atienden los sábados" o
+    #    "cuánto cuesta" se confundan con "consultar mi cita").
+    mentions_own_appt = any(m in low for m in _OWN_APPOINTMENT_MARKERS)
+    if not mentions_own_appt and any(k in low for k in _GENERAL_INFO_KEYWORDS):
+        return "desconocido"
+
+    return None  # ambiguo -> que decida el LLM
+
 # ── Nodo 1: ROUTER ─────────────────────────────────────────────────────────
 def router_node(state: AgentState) -> AgentState:
     if state["step"] not in ("idle", "done"):
         return state
 
     history = state.get("conversation_history", [])
-    prompt = f"""# Rol
+    user_input = state["user_input"]
+
+    intent = _deterministic_intent(user_input)
+
+    if intent is None:
+        prompt = f"""# Rol
 Eres el clasificador de intenciones del chat de Clínica Cobba, una clínica
 odontológica peruana.
 
@@ -168,21 +286,25 @@ Ejemplos:
 - "me duele mucho una muela, es urgente" → humano (emergencia, no es información general)
 - "tengo una queja sobre mi última visita" → humano
 - "quiero hablar con alguien de recepción" → humano
+- "cuéntame un chiste" → desconocido (charla trivial fuera de tema, NO es una emergencia ni una queja)
+- "hola, cómo estás" → desconocido (saludo)
 
 # Manejo de errores
 Si el mensaje es ambiguo o no tienes suficiente certeza, clasifica como
 "desconocido" en vez de adivinar una acción sensible (agendar/cancelar/
-modificar).
+modificar). "humano" es SOLO para emergencias, quejas o pedidos explícitos
+de hablar con una persona — nunca lo uses para charla trivial, bromas o
+preguntas sin relación con eso, por más raras o fuera de tema que sean.
 
 # Formato de salida
 Responde SOLO con una palabra exacta de la lista anterior, en minúsculas,
 sin puntuación, sin comillas y sin explicación.
 """
-    result = llm.invoke([SystemMessage(content=prompt)])
-    raw = (result.content or "").strip().lower()
-    intent = raw.split()[0] if raw else "desconocido"
-    valid = {"agendar", "cancelar", "consultar", "modificar", "humano"}
-    intent = intent if intent in valid else "desconocido"
+        result = classifier_llm.invoke([SystemMessage(content=prompt)])
+        raw = (result.content or "").strip().lower()
+        parsed_intent = raw.split()[0] if raw else "desconocido"
+        valid = {"agendar", "cancelar", "consultar", "modificar", "humano"}
+        intent = parsed_intent if parsed_intent in valid else "desconocido"
 
     new_step = state["step"]
     if intent == "agendar":
@@ -342,7 +464,7 @@ Responde SOLO con este JSON (sin texto adicional, sin markdown):
   "hora_solicitada": "<hora en formato HH:MM si la mencionó, o null>"
 }}
 """
-        parsed = _parse_json(llm.invoke([SystemMessage(content=prompt)]).content)
+        parsed = _parse_json(classifier_llm.invoke([SystemMessage(content=prompt)]).content)
         accion = parsed.get("accion", "pedir_mas_opciones")
 
         if accion == "elegir_disponible" and parsed.get("indice"):
@@ -548,7 +670,7 @@ Responde SOLO con este JSON (sin texto adicional, sin markdown):
   "hora_solicitada": "<hora en formato HH:MM si la mencionó, o null>"
 }}
 """
-        parsed = _parse_json(llm.invoke([SystemMessage(content=prompt)]).content)
+        parsed = _parse_json(classifier_llm.invoke([SystemMessage(content=prompt)]).content)
         accion = parsed.get("accion", "pedir_mas_opciones")
 
         if accion == "elegir_disponible" and parsed.get("indice"):
@@ -690,7 +812,7 @@ Responde SOLO con una palabra: si | no
 
 Mensaje del paciente: "{user_input}"
 """
-        decision = llm.invoke([SystemMessage(content=prompt)]).content.strip().lower()
+        decision = classifier_llm.invoke([SystemMessage(content=prompt)]).content.strip().lower()
         confirmed = "si" in decision or "sí" in decision
 
         if confirmed:
@@ -744,6 +866,9 @@ def fallback_node(state: AgentState) -> AgentState:
 Eres el asistente virtual de Clínica Cobba, una clínica odontológica
 peruana. Atiendes pacientes por chat: resuelves dudas administrativas
 generales y los derivas al flujo correspondiente cuando corresponde.
+SOLO respondes temas relacionados a la clínica (horarios, ubicación,
+precios, seguros, políticas, especialidades, citas). No eres un asistente
+de conocimiento general.
 
 # Base de conocimiento recuperada (usar como única fuente de verdad)
 {kb_context}
@@ -751,8 +876,15 @@ generales y los derivas al flujo correspondiente cuando corresponde.
 # Instrucciones
 1. Responde en español, de forma cálida, profesional y concisa (máx. 3-4
    líneas).
-2. Si la base de conocimiento anterior contiene la respuesta, básate
-   ÚNICAMENTE en ella.
+2. Primero revisa la sección "Base de conocimiento recuperada" de arriba:
+   - Si SÍ contiene información relevante para la pregunta, respóndela
+     directamente con esa información. NO empieces diciendo "no tengo ese
+     dato" ni derives a recepción si la respuesta ya está ahí arriba —
+     decir que no tienes un dato que sí tienes es un error grave que
+     confunde al paciente.
+   - Si el paréntesis dice "No se encontró información específica...",
+     ahí sí es honesto decir que no tienes ese dato y ofrecer que
+     recepción lo confirme.
 3. Si el paciente quiere agendar una cita, dile que escriba
    "quiero agendar una cita".
 4. Si quiere consultar, modificar o cancelar una cita, dile que te lo pida
@@ -761,9 +893,17 @@ generales y los derivas al flujo correspondiente cuando corresponde.
    escriba "hablar con recepción".
 
 # Manejo de errores
-Si la base de conocimiento no cubre lo que el paciente pregunta, dilo con
-honestidad ("no tengo ese dato a la mano") y ofrece que recepción se lo
-confirme. NO inventes horarios, precios, direcciones ni políticas.
+- Si la base de conocimiento no cubre lo que el paciente pregunta, dilo
+  con honestidad ("no tengo ese dato a la mano") y ofrece que recepción
+  se lo confirme. NO inventes horarios, precios, direcciones ni
+  políticas.
+- Si la pregunta NO tiene nada que ver con la clínica (cultura general,
+  geografía, entretenimiento, bromas, u otro tema ajeno), NO la
+  respondas con tu propio conocimiento aunque la sepas. Dile con
+  amabilidad que solo puedes ayudar con temas de la clínica. Ejemplo:
+  si preguntan "¿cuál es la capital de Francia?" o "cuéntame un
+  chiste", NO respondas la trivia/broma — indica que solo puedes ayudar
+  con temas de Clínica Cobba.
 
 # Restricciones
 - NO propongas agendar una cita a menos que el paciente lo haya pedido
@@ -771,15 +911,14 @@ confirme. NO inventes horarios, precios, direcciones ni políticas.
 - NO des consejos médicos ni diagnósticos; solo información administrativa
   de la clínica.
 - NO inventes datos que no estén en la base de conocimiento recuperada.
-- Si el paciente menciona un nombre propio (una aseguradora, un doctor,
-  una marca, etc.) y ese nombre específico NO aparece mencionado en la
-  base de conocimiento recuperada, NO confirmes ni niegues que aplica a
-  él. Responde de forma genérica con lo que sí dice la base de
-  conocimiento y aclara que ese dato puntual debe confirmarlo recepción.
-  Ejemplo: si preguntan "¿aceptan mi seguro Rimac?" y la base de
-  conocimiento no menciona "Rimac" explícitamente, NO respondas "sí,
-  aceptamos Rimac"; responde explicando la política general de reembolso
-  y que recepción debe confirmar si esa aseguradora específica aplica.
+- Si el paciente menciona el nombre de una aseguradora, doctor o marca
+  específica y ese nombre NO aparece mencionado en la base de
+  conocimiento recuperada, NO confirmes ni niegues que aplica a él.
+  Responde de forma genérica con lo que sí dice la base de conocimiento
+  y aclara que ese dato puntual debe confirmarlo recepción. (Si el
+  nombre SÍ aparece en la base de conocimiento recuperada, como Rímac,
+  Pacífico, La Positiva o Mapfre en el documento de seguros, sí puedes
+  confirmarlo con confianza porque está respaldado por la fuente.)
 
 # Historial reciente
 {history_text}
