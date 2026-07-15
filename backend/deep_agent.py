@@ -190,7 +190,9 @@ Contexto adicional: Análisis del {fecha}, {data.get('total_citas')} citas anali
 
 # Restricciones
 - Usa solo el dato clave proporcionado; no inventes cifras adicionales.
-- No des indicaciones médicas, solo recomendaciones operativas/administrativas.
+- NO des indicaciones médicas ni de medicación; solo recomendaciones
+  operativas/administrativas para la gerencia (ej. horarios, personal,
+  comunicación con pacientes, procesos internos).
 - La recomendación debe ser específica, accionable y profesional.
 
 # Formato de salida
