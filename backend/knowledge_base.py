@@ -88,29 +88,34 @@ KB_DOCUMENTS: list[dict] = [
         "contenido": (
             "Clínica Cobba atiende de lunes a sábado de 9:00 a.m. a 7:00 p.m. "
             "Domingos y feriados permanecemos cerrados. "
-            "[COMPLETAR: dirección exacta, referencia y teléfono de recepción]."
+            "Nuestra dirección y ubicación es Av. España 662, Trujillo 13011. "
+            "Si preguntas dónde quedamos, dónde estamos ubicados o cómo llegar, "
+            "esa es la dirección de la clínica. "
+            "Teléfono de recepción: 924 461 285."
         ),
     },
     {
         "id": "seguros_convenios",
         "categoria": "Seguros y convenios",
         "contenido": (
-            "Aceptamos reembolso de gastos médicos con la mayoría de seguros "
-            "privados; el paciente paga la consulta y luego tramita el "
-            "reembolso con su aseguradora. "
-            "[COMPLETAR: lista real de aseguradoras/convenios y el "
-            "procedimiento exacto para usarlos en esta clínica]."
+            "Trabajamos bajo la modalidad de reembolso con las principales "
+            "aseguradoras del país: Rímac, Pacífico Seguros, La Positiva y "
+            "Mapfre. El paciente paga la consulta directamente en la clínica "
+            "y nosotros le entregamos la factura y el informe médico necesarios "
+            "para que gestione el reembolso con su aseguradora. No trabajamos "
+            "con descuento directo en caja (copago) por el momento."
         ),
     },
     {
         "id": "precios_referenciales",
         "categoria": "Precios referenciales",
         "contenido": (
-            "El costo final de cada tratamiento se confirma tras la "
-            "evaluación del especialista, ya que depende del diagnóstico. "
-            "[COMPLETAR: rangos de precios reales por especialidad, si la "
-            "clínica desea publicarlos, por ejemplo consulta general, "
-            "limpieza dental, ortodoncia, etc.]."
+            "El costo final de cada tratamiento se confirma tras la evaluación "
+            "del especialista, ya que depende del diagnóstico. Precios "
+            "referenciales: Consulta/evaluación general S/ 80. Limpieza dental "
+            "(profilaxis) S/ 120 a S/ 150. Resina simple S/ 150 a S/ 250. "
+            "Extracción simple S/ 100 a S/ 180. Ortodoncia con brackets "
+            "metálicos desde S/ 2,500, con evaluación previa sin costo."
         ),
     },
     {
@@ -119,9 +124,10 @@ KB_DOCUMENTS: list[dict] = [
         "contenido": (
             "El paciente puede cancelar una cita o reprogramar/modificar una "
             "cita sin costo si avisa con al menos 24 horas de anticipación, "
-            "ya sea por este chat o llamando a recepción. "
-            "[COMPLETAR: política real de penalidad por inasistencia "
-            "(No-Show) si la clínica aplica alguna]."
+            "ya sea por este chat o llamando a recepción. Si el paciente falta "
+            "sin avisar (No-Show) en más de 2 ocasiones consecutivas, se le "
+            "pedirá confirmar su siguiente cita con 24 horas de anticipación "
+            "antes de que quede reservada en la agenda del doctor."
         ),
     },
     {
@@ -233,4 +239,19 @@ def format_context_for_prompt(docs: list[dict]) -> str:
             "(No se encontró información específica en la base de conocimiento "
             "para esta pregunta. No inventes la respuesta: indícalo con honestidad.)"
         )
-    return "\n\n".join(f"[{d['categoria']}]\n{d['contenido']}" for d in docs)
+
+    def _strip_internal_notes(contenido: str) -> str:
+        # Los marcadores [COMPLETAR: ...] son notas internas para el equipo
+        # (datos aún no verificados), NUNCA deben llegar al paciente. Se
+        # quitan aquí mismo, en el código, en vez de confiar en que el LLM
+        # obedezca la instrucción de ignorarlos (un modelo chico como el
+        # 8B a veces los copia igual si están literalmente en el contexto).
+        text = re.sub(r"\[COMPLETAR:[^\]]*\]", "", contenido)
+        text = re.sub(r"\s+\.", ".", text)   # limpia " ." residual
+        text = re.sub(r"\.{2,}", ".", text)  # colapsa ".." residual
+        text = re.sub(r"\s{2,}", " ", text)  # colapsa espacios dobles
+        return text.strip()
+
+    return "\n\n".join(
+        f"[{d['categoria']}]\n{_strip_internal_notes(d['contenido'])}" for d in docs
+    )

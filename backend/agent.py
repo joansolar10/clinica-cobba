@@ -72,6 +72,43 @@ def _history_text(history: list, n: int = 6) -> str:
         for m in recent
     )
 
+def _try_parse_plain_number(user_input: str, n_options: int):
+    """
+    Si el paciente escribió solo un número (ej. "3", "el 3", "opción 3."),
+    lo interpretamos directo con código, SIN pasar por el LLM.
+
+    Por qué: dejamos que el LLM interprete el número antes, y para casos
+    fuera de rango (ej. elegir "12" habiendo solo 10 opciones) a veces no
+    reportaba fielmente ese valor — "adivinaba" un índice válido en vez de
+    decir honestamente que no existía. Para el caso simple y más común
+    (un número puro) no hace falta el LLM: se valida con código.
+
+    Devuelve (es_numero_simple, indice_0_based):
+      - (False, None)  -> el mensaje no es un número simple, seguir con el LLM
+      - (True, idx)     -> número válido, idx es el índice 0-based
+      - (True, -1)      -> es un número simple pero está fuera de rango
+    """
+    m = re.match(r"^\s*(?:opci[oó]n\s*)?#?\s*(\d+)\s*[\.\)]?\s*$", (user_input or "").strip().lower())
+    if not m:
+        return False, None
+    idx = int(m.group(1)) - 1
+    if 0 <= idx < n_options:
+        return True, idx
+    return True, -1
+
+_NAME_RE = re.compile(r"^[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+(?:[\s'-][A-Za-zÁÉÍÓÚÑÜáéíóúñü]+)*$")
+
+def _is_valid_name(text: str) -> bool:
+    """
+    Valida que un nombre/apellido contenga solo letras (incluye tildes, ñ),
+    espacios, apóstrofes o guiones para nombres compuestos (ej. "María José",
+    "O'Brien", "Pérez-Gómez"). Rechaza números y símbolos.
+    """
+    text = (text or "").strip()
+    if not text or len(text) > 60:
+        return False
+    return bool(_NAME_RE.match(text))
+
 # ── Nodo 1: ROUTER ─────────────────────────────────────────────────────────
 def router_node(state: AgentState) -> AgentState:
     if state["step"] not in ("idle", "done"):
@@ -112,11 +149,17 @@ UNA CITA PROPIA YA EXISTENTE. Si la pregunta es información general sobre
 la clínica y no sobre una cita específica del paciente, es "desconocido",
 aunque use palabras como "cita", "horario" o "disponible".
 
+Pista práctica: si el mensaje empieza con "qué debo", "qué necesito",
+"cómo funciona", "cuánto cuesta", "a qué hora", o pregunta por un
+REQUISITO o POLÍTICA en general (no por el estado de una cita que el
+paciente ya tiene), es "desconocido" — aunque mencione la palabra "cita".
+
 Ejemplos:
 - "¿A qué hora abren los sábados?" → desconocido (horario general, no una cita propia)
 - "¿Tienen atención los domingos?" → desconocido
 - "¿Aceptan mi seguro Rimac?" → desconocido
 - "¿Cuánto cuesta una limpieza?" → desconocido
+- "¿Qué debo llevar a mi primera cita?" → desconocido (información general de requisitos, no pregunta por SU cita)
 - "¿Cuándo es mi próxima cita?" → consultar (es SU cita)
 - "Quiero ver mis citas" → consultar
 - "Ya no puedo ir a mi cita del jueves" → cancelar
@@ -173,8 +216,8 @@ def scheduler_node(state: AgentState) -> AgentState:
 
     if step == "processing_dni_for_action":
         dni = re.sub(r"[^0-9]", "", user_input)
-        if len(dni) < 8:
-            response = "❌ El DNI parece inválido. Por favor, ingresa tus 8 dígitos:"
+        if len(dni) != 8:
+            response = "❌ El DNI debe tener exactamente 8 dígitos. Por favor, ingrésalo de nuevo:"
             return _reply(response, "processing_dni_for_action")
         
         citas = sync_get_appointments_by_dni(dni)
@@ -247,6 +290,28 @@ def scheduler_node(state: AgentState) -> AgentState:
         specialty = extracted.get("specialty", "")
         cita_a_modificar = extracted.get("cita_a_modificar")
         slots_text = _slots_to_text(slots, show_doctor=True)
+
+        # Atajo determinístico: si el paciente escribió solo un número,
+        # lo resolvemos directo con código (ver _try_parse_plain_number),
+        # sin pasar por el LLM.
+        is_plain_number, idx = _try_parse_plain_number(user_input, len(slots))
+        if is_plain_number:
+            if idx is not None and idx >= 0:
+                slot = slots[idx]
+                sync_update_appointment(cita_a_modificar["id"], doctor=slot["doctor"], date=slot["date"], time=slot["time"])
+                response = (
+                    f"✅ ¡Perfecto! Tu cita ha sido reprogramada con **{slot['doctor']}** "
+                    f"para el **{slot['date']}** a las **{slot['time']}**.\n\n"
+                    f"¿Hay algo más en lo que pueda ayudarte?"
+                )
+                return {**state, "step": "done", "extracted": {}, "intent": None, "response": response, "conversation_history": history}
+            else:
+                response = (
+                    f"Ese número no está en la lista — tengo {len(slots)} horario"
+                    f"{'s' if len(slots) != 1 else ''} disponible{'s' if len(slots) != 1 else ''} "
+                    f"(del 1 al {len(slots)}). Por favor elige un número válido:\n\n{slots_text}"
+                )
+                return _reply(response, "slot_pick_for_modify")
 
         prompt = f"""# Rol
 Eres el asistente de agenda de Clínica Cobba.
@@ -433,6 +498,27 @@ Responde SOLO con este JSON (sin texto adicional, sin markdown):
         doctor_filter = extracted.get("doctor_filter")
         slots_text = _slots_to_text(slots, show_doctor=(doctor_filter is None))
 
+        # Atajo determinístico: si el paciente escribió solo un número,
+        # lo resolvemos directo con código, sin pasar por el LLM.
+        is_plain_number, idx = _try_parse_plain_number(user_input, len(slots))
+        if is_plain_number:
+            if idx is not None and idx >= 0:
+                slot = slots[idx]
+                extracted.update({"doctor": slot["doctor"], "date": slot["date"], "time": slot["time"]})
+                response = (
+                    f"¡Perfecto! Reservé el espacio con **{slot['doctor']}** "
+                    f"para el **{slot['date']}** a las **{slot['time']}**.\n\n"
+                    f"Para registrarte, ¿cuál es tu **primer nombre**?"
+                )
+                return _reply(response, "asking_first_name")
+            else:
+                response = (
+                    f"Ese número no está en la lista — tengo {len(slots)} horario"
+                    f"{'s' if len(slots) != 1 else ''} disponible{'s' if len(slots) != 1 else ''} "
+                    f"(del 1 al {len(slots)}). Por favor elige un número válido:\n\n{slots_text}"
+                )
+                return _reply(response, "slot_pick")
+
         prompt = f"""# Rol
 Eres el asistente de agenda de Clínica Cobba.
 
@@ -548,20 +634,34 @@ Responde SOLO con este JSON (sin texto adicional, sin markdown):
 
     # ── PASO 4-6: Recolección de datos del paciente ────────────────────────
     if step == "asking_first_name":
-        name = user_input.strip().title()
+        candidate = user_input.strip()
+        if not _is_valid_name(candidate):
+            response = (
+                "❌ El nombre solo debe contener letras (sin números ni símbolos). "
+                "Por favor, ingresa tu **primer nombre** de nuevo:"
+            )
+            return _reply(response, "asking_first_name")
+        name = candidate.title()
         extracted["firstName"] = name
         response = f"Gracias, {name}. ¿Cuáles son tus **apellidos**?"
         return _reply(response, "asking_last_name")
 
     if step == "asking_last_name":
-        extracted["lastName"] = user_input.strip().title()
+        candidate = user_input.strip()
+        if not _is_valid_name(candidate):
+            response = (
+                "❌ Los apellidos solo deben contener letras (sin números ni símbolos). "
+                "Por favor, ingrésalos de nuevo:"
+            )
+            return _reply(response, "asking_last_name")
+        extracted["lastName"] = candidate.title()
         response = "Perfecto. Por último, ingresa tu **número de DNI** (8 dígitos):"
         return _reply(response, "asking_dni")
 
     if step == "asking_dni":
         dni = re.sub(r"[^0-9]", "", user_input)
-        if len(dni) < 8:
-            response = "❌ El DNI parece inválido (mínimo 8 dígitos). Inténtalo de nuevo:"
+        if len(dni) != 8:
+            response = "❌ El DNI debe tener exactamente 8 dígitos. Inténtalo de nuevo:"
             return _reply(response, "asking_dni")
 
         extracted["dni"] = dni
