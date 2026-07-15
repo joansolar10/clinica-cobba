@@ -60,6 +60,13 @@ def _strip_accents(text: str) -> str:
     return "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
 
 
+# Comparamos tokens ya normalizados (sin tilde) contra esta versión también
+# sin tilde de las stopwords, para que entradas como "sí"/"qué" (guardadas
+# con tilde arriba) sigan filtrando correctamente sus variantes sin tilde
+# ("si", "que") una vez que _analyze() normaliza antes de comparar.
+_SPANISH_STOPWORDS_NORM = {_strip_accents(w) for w in _SPANISH_STOPWORDS}
+
+
 def _normalize_word(word: str) -> str:
     """Normalización morfológica ligera para reducir singular/plural al
     mismo token: 'sábados' -> 'sabado', 'seguros' -> 'seguro'."""
@@ -72,13 +79,15 @@ def _normalize_word(word: str) -> str:
 
 
 def _analyze(text: str) -> list[str]:
-    """Tokeniza, quita stopwords y normaliza. Usado tanto por el
-    vectorizador TF-IDF como por el fallback de conteo de palabras."""
+    """Tokeniza, normaliza (quita tildes y plurales simples) y luego filtra
+    stopwords. El ORDEN importa: si filtráramos antes de normalizar,
+    palabras con tilde como 'cuál' no calzarían con la entrada sin tilde
+    'cual' de la lista de stopwords y se colarían como si fueran una
+    palabra de contenido (causaba falsos positivos, ej. la pregunta
+    "¿cuál es la capital de Francia?" matcheando documentos al azar)."""
     raw_tokens = re.findall(r"[a-záéíóúñ0-9]+", (text or "").lower())
-    return [
-        _normalize_word(t) for t in raw_tokens
-        if t not in _SPANISH_STOPWORDS and len(t) > 1
-    ]
+    normalized = (_normalize_word(t) for t in raw_tokens)
+    return [t for t in normalized if t not in _SPANISH_STOPWORDS_NORM and len(t) > 1]
 
 # ── Base de conocimiento (documentos fuente para RAG) ──────────────────────
 KB_DOCUMENTS: list[dict] = [
@@ -87,7 +96,9 @@ KB_DOCUMENTS: list[dict] = [
         "categoria": "Horarios y ubicación",
         "contenido": (
             "Clínica Cobba atiende de lunes a sábado de 9:00 a.m. a 7:00 p.m. "
-            "Domingos y feriados permanecemos cerrados. "
+            "Nuestro horario de atención, es decir la hora en la que abrimos y "
+            "atendemos, es de 9:00 a.m. a 7:00 p.m. de lunes a sábado. "
+            "Domingos y feriados permanecemos cerrados, no abrimos. "
             "Nuestra dirección y ubicación es Av. España 662, Trujillo 13011. "
             "Si preguntas dónde quedamos, dónde estamos ubicados o cómo llegar, "
             "esa es la dirección de la clínica. "
@@ -111,8 +122,10 @@ KB_DOCUMENTS: list[dict] = [
         "categoria": "Precios referenciales",
         "contenido": (
             "El costo final de cada tratamiento se confirma tras la evaluación "
-            "del especialista, ya que depende del diagnóstico. Precios "
-            "referenciales: Consulta/evaluación general S/ 80. Limpieza dental "
+            "del especialista, ya que depende del diagnóstico. Si preguntas "
+            "cuánto cuesta, cuál es el precio o el costo de una consulta, "
+            "estos son los precios referenciales: Consulta/evaluación general "
+            "S/ 80. Limpieza dental "
             "(profilaxis) S/ 120 a S/ 150. Resina simple S/ 150 a S/ 250. "
             "Extracción simple S/ 100 a S/ 180. Ortodoncia con brackets "
             "metálicos desde S/ 2,500, con evaluación previa sin costo."
@@ -123,11 +136,12 @@ KB_DOCUMENTS: list[dict] = [
         "categoria": "Política de cancelación y reprogramación",
         "contenido": (
             "El paciente puede cancelar una cita o reprogramar/modificar una "
-            "cita sin costo si avisa con al menos 24 horas de anticipación, "
-            "ya sea por este chat o llamando a recepción. Si el paciente falta "
-            "sin avisar (No-Show) en más de 2 ocasiones consecutivas, se le "
-            "pedirá confirmar su siguiente cita con 24 horas de anticipación "
-            "antes de que quede reservada en la agenda del doctor."
+            "cita sin costo si avisa con al menos 24h (un día) de "
+            "anticipación, ya sea por este chat o llamando a recepción. Si "
+            "el paciente falta sin avisar (No-Show) en más de 2 ocasiones "
+            "consecutivas, se le pedirá confirmar su siguiente cita con 24h "
+            "de anticipación antes de que quede reservada en la agenda del "
+            "doctor."
         ),
     },
     {
@@ -146,9 +160,12 @@ KB_DOCUMENTS: list[dict] = [
         "contenido": (
             "Clínica Cobba atiende las especialidades de Odontología "
             "General, Ortodoncia, Endodoncia, Periodoncia, Implantología y "
-            "Odontopediatría. Para agendar, el paciente debe escribir que "
-            "quiere agendar una cita y el bot le mostrará los horarios "
-            "disponibles de cada especialidad."
+            "Odontopediatría. Contamos con especialistas en cada área: "
+            "odontólogos generales, ortodoncistas, endodoncistas, "
+            "periodoncistas, implantólogos y odontopediatras. "
+            "Para agendar, el paciente debe escribir que quiere agendar una "
+            "cita y el bot le mostrará los horarios disponibles de cada "
+            "especialidad."
         ),
     },
     {
